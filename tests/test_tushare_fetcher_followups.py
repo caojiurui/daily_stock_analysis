@@ -27,6 +27,9 @@ from data_provider.tushare_fetcher import TushareFetcher
 class TestTushareFetcherFollowUps(unittest.TestCase):
     """Cover rate limiting and cross-day trade-calendar refresh behavior."""
 
+    def setUp(self) -> None:
+        TushareFetcher._trade_calendar_cache.clear()
+
     @staticmethod
     def _make_fetcher() -> TushareFetcher:
         with patch.object(TushareFetcher, "_init_api", return_value=None):
@@ -57,6 +60,29 @@ class TestTushareFetcherFollowUps(unittest.TestCase):
 
         self.assertEqual(fetcher._api.trade_cal.call_count, 2)
         self.assertEqual(rate_limit_mock.call_count, 2)
+
+    def test_get_trade_time_reuses_cached_trade_calendar_across_fetcher_instances(self) -> None:
+        first = self._make_fetcher()
+        second = self._make_fetcher()
+        first._api.trade_cal.return_value = pd.DataFrame(
+            {
+                "cal_date": ["20260317", "20260314"],
+                "is_open": [1, 1],
+            }
+        )
+
+        with patch.object(first, "_get_china_now", return_value=datetime(2026, 3, 17, 20, 0)), patch.object(
+            first, "_check_rate_limit"
+        ) as first_rate_limit_mock, patch.object(second, "_get_china_now", return_value=datetime(2026, 3, 17, 20, 0)), patch.object(
+            second, "_check_rate_limit"
+        ) as second_rate_limit_mock:
+            self.assertEqual(first.get_trade_time(early_time="00:00", late_time="19:00"), "20260317")
+            self.assertEqual(second.get_trade_time(early_time="00:00", late_time="19:00"), "20260317")
+
+        self.assertEqual(first._api.trade_cal.call_count, 1)
+        self.assertEqual(second._api.trade_cal.call_count, 0)
+        self.assertEqual(first_rate_limit_mock.call_count, 1)
+        self.assertEqual(second_rate_limit_mock.call_count, 0)
     def test_get_trade_time_returns_latest_trade_date_on_non_trade_day(self) -> None:
         """Non-trade day (e.g. Saturday) should return the most recent trade
         date (Friday), not the one before it (Thursday).  Fixes #1009."""

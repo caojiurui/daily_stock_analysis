@@ -129,6 +129,8 @@ class TushareFetcher(BaseFetcher):
     
     name = "TushareFetcher"
     priority = int(os.getenv("TUSHARE_PRIORITY", "2"))  # 默认优先级，会在 __init__ 中根据配置动态调整
+    _trade_calendar_cache: Dict[str, List[str]] = {}
+    _trade_calendar_cache_max_entries = 8
 
     def __init__(self, rate_limit_per_minute: int = 80):
         """
@@ -267,6 +269,22 @@ class TushareFetcher(BaseFetcher):
         """返回上海时区当前时间，方便测试覆盖跨日刷新逻辑。"""
         return datetime.now(ZoneInfo("Asia/Shanghai"))
 
+    @classmethod
+    def _get_shared_trade_calendar(cls, end_date: str) -> Optional[List[str]]:
+        cached = cls._trade_calendar_cache.get(end_date)
+        if cached is None:
+            return None
+        return list(cached)
+
+    @classmethod
+    def _set_shared_trade_calendar(cls, end_date: str, trade_dates: List[str]) -> None:
+        if end_date in cls._trade_calendar_cache:
+            cls._trade_calendar_cache.pop(end_date, None)
+        cls._trade_calendar_cache[end_date] = list(trade_dates)
+        while len(cls._trade_calendar_cache) > cls._trade_calendar_cache_max_entries:
+            oldest_key = next(iter(cls._trade_calendar_cache))
+            cls._trade_calendar_cache.pop(oldest_key, None)
+
     def _get_trade_dates(self, end_date: Optional[str] = None) -> List[str]:
         """按自然日刷新交易日历缓存，避免服务跨日后继续复用旧日历。"""
         if self._api is None:
@@ -276,6 +294,12 @@ class TushareFetcher(BaseFetcher):
         requested_end_date = end_date or china_now.strftime("%Y%m%d")
 
         if self.date_list is not None and self._date_list_end == requested_end_date:
+            return self.date_list
+
+        shared_trade_dates = self._get_shared_trade_calendar(requested_end_date)
+        if shared_trade_dates is not None:
+            self.date_list = shared_trade_dates
+            self._date_list_end = requested_end_date
             return self.date_list
 
         start_date = (china_now - timedelta(days=20)).strftime("%Y%m%d")
@@ -290,6 +314,7 @@ class TushareFetcher(BaseFetcher):
             logger.warning("[Tushare] trade_cal 返回为空，无法更新交易日历缓存")
             self.date_list = []
             self._date_list_end = requested_end_date
+            self._set_shared_trade_calendar(requested_end_date, self.date_list)
             return self.date_list
 
         trade_dates = sorted(
@@ -298,6 +323,7 @@ class TushareFetcher(BaseFetcher):
         )
         self.date_list = trade_dates
         self._date_list_end = requested_end_date
+        self._set_shared_trade_calendar(requested_end_date, trade_dates)
         return trade_dates
 
     @staticmethod
