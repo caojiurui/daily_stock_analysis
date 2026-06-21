@@ -51,6 +51,9 @@ class OpportunityApiTestCase(unittest.TestCase):
                     "url": "https://example.invalid/ai",
                 }
             ],
+        ), patch(
+            "src.extensions.opportunity.service.ThsExternalInfoProvider.collect",
+            return_value={"industry_rows": [], "concept_rows": [], "stock_signals": {}, "warnings": []},
         ):
             payload = opportunities_endpoint.opportunity_overview(config=config, market="cn", scope="balanced", limit=5)
 
@@ -119,14 +122,32 @@ class OpportunityApiTestCase(unittest.TestCase):
     def test_scan_submits_background_opportunity_task(self) -> None:
         config = self._config(enabled=True)
 
-        with patch.object(opportunities_endpoint.OpportunityService, "scan", return_value={"enabled": True, "opportunities": []}):
+        with patch.object(
+            opportunities_endpoint.OpportunityService,
+            "scan",
+            return_value={
+                "enabled": True,
+                "market": "cn",
+                "scope": "balanced",
+                "risk_profile": "aggressive",
+                "limit": 3,
+                "opportunities": [],
+            },
+        ):
             accepted = opportunities_endpoint.opportunity_start_scan_task(
-                opportunities_endpoint.OpportunityScanRequest(market="cn", scope="balanced", watchlist_only=False, max_results=3),
+                opportunities_endpoint.OpportunityScanRequest(
+                    market="cn",
+                    scope="balanced",
+                    risk_profile="aggressive",
+                    watchlist_only=False,
+                    max_results=3,
+                ),
                 config=config,
             )
 
             self.assertEqual(accepted.status, "pending")
             self.assertEqual(accepted.market, "cn")
+            self.assertEqual(accepted.risk_profile, "aggressive")
 
             deadline = time.time() + 3
             status = opportunities_endpoint.opportunity_scan_task_status(accepted.task_id)
@@ -136,6 +157,7 @@ class OpportunityApiTestCase(unittest.TestCase):
 
             self.assertEqual(status.status, QueueTaskStatus.COMPLETED.value)
             self.assertIsNotNone(status.result)
+            self.assertEqual(status.risk_profile, "aggressive")
 
 
 if __name__ == "__main__":

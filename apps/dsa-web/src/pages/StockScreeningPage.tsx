@@ -39,13 +39,16 @@ import {
   type AlphaSiftStrategy,
 } from '../api/alphasift';
 import { formatParsedApiError, getParsedApiError, toApiErrorMessage, type ParsedApiError } from '../api/error';
-import { opportunitiesApi, type OpportunityOverview } from '../api/opportunities';
+import { opportunitiesApi, type OpportunityOverview, type OpportunityScanTaskStatus } from '../api/opportunities';
 import { AppPage, Button, InlineAlert } from '../components/common';
 import { useWatchlist } from '../hooks/useWatchlist';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
 const SCREEN_TASK_STORAGE_KEY = 'dsa.alphasift.activeScreenTask.v1';
 const SCREEN_TASK_POLL_INTERVAL_MS = 2000;
+const OPPORTUNITY_OVERVIEW_STORAGE_KEY = 'dsa.alphasift.opportunityOverview.v1';
+const OPPORTUNITY_TASK_STORAGE_KEY = 'dsa.alphasift.opportunityTask.v1';
+const OPPORTUNITY_TASK_POLL_INTERVAL_MS = 2000;
 const SCREENING_PRESETS = [
   { id: 'balanced', label: '均衡', strategy: 'dual_low', maxResults: 6, helper: '兼顾稳健与机会，适合作为默认模式' },
   { id: 'focused', label: '精选', strategy: 'dual_low', maxResults: 3, helper: '只看少量候选，适合快速浏览' },
@@ -70,6 +73,22 @@ type PersistedScreenTask = {
   market: string;
   strategy: string;
   maxResults: number;
+};
+
+type PersistedOpportunityTask = {
+  taskId: string;
+  market: string;
+  scope: OpportunityScope;
+  riskProfile: OpportunityRiskProfile;
+  maxResults: number;
+};
+
+type PersistedOpportunityOverview = {
+  overview: OpportunityOverview;
+  market: string;
+  scope: OpportunityScope;
+  riskProfile: OpportunityRiskProfile;
+  savedAt: string;
 };
 
 const readPersistedScreenTask = (): PersistedScreenTask | null => {
@@ -113,6 +132,85 @@ const clearPersistedScreenTask = () => {
   }
 };
 
+const readPersistedOpportunityTask = (): PersistedOpportunityTask | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(OPPORTUNITY_TASK_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PersistedOpportunityTask>;
+    if (typeof parsed.taskId !== 'string' || !parsed.taskId.trim()) {
+      return null;
+    }
+    const scope = parsed.scope;
+    const riskProfile = parsed.riskProfile;
+    const maxResults = Number(parsed.maxResults);
+    return {
+      taskId: parsed.taskId,
+      market: typeof parsed.market === 'string' && parsed.market.trim() ? parsed.market : 'cn',
+      scope: scope === 'stock' || scope === 'etf' || scope === 'balanced' ? scope : 'balanced',
+      riskProfile: riskProfile === 'conservative' || riskProfile === 'aggressive' || riskProfile === 'balanced' ? riskProfile : 'balanced',
+      maxResults: Number.isFinite(maxResults) ? Math.min(50, Math.max(1, maxResults)) : 6,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const persistOpportunityTask = (task: PersistedOpportunityTask) => {
+  try {
+    window.localStorage.setItem(OPPORTUNITY_TASK_STORAGE_KEY, JSON.stringify(task));
+  } catch {
+    // Local storage is best-effort.
+  }
+};
+
+const clearPersistedOpportunityTask = () => {
+  try {
+    window.localStorage.removeItem(OPPORTUNITY_TASK_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+};
+
+const readPersistedOpportunityOverview = (): PersistedOpportunityOverview | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(OPPORTUNITY_OVERVIEW_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PersistedOpportunityOverview>;
+    if (!parsed.overview || typeof parsed.overview !== 'object') {
+      return null;
+    }
+    const scope = parsed.scope;
+    const riskProfile = parsed.riskProfile;
+    return {
+      overview: parsed.overview as OpportunityOverview,
+      market: typeof parsed.market === 'string' && parsed.market.trim() ? parsed.market : 'cn',
+      scope: scope === 'stock' || scope === 'etf' || scope === 'balanced' ? scope : 'balanced',
+      riskProfile: riskProfile === 'conservative' || riskProfile === 'aggressive' || riskProfile === 'balanced' ? riskProfile : 'balanced',
+      savedAt: typeof parsed.savedAt === 'string' && parsed.savedAt.trim() ? parsed.savedAt : new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+};
+
+const persistOpportunityOverview = (snapshot: PersistedOpportunityOverview) => {
+  try {
+    window.localStorage.setItem(OPPORTUNITY_OVERVIEW_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Local storage is best-effort.
+  }
+};
+
 const isUnrecoverableScreenTaskError = (error: ParsedApiError) =>
   error.title === '选股任务不可恢复';
 
@@ -142,6 +240,23 @@ const formatAmount = (value: unknown) => {
     return `${(amount / 10_000).toFixed(2)} 万`;
   }
   return amount.toFixed(2);
+};
+
+const formatDateTime = (value: string | null | undefined) => {
+  if (!value) {
+    return '-';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return '-';
+  }
+  return parsed.toLocaleString('zh-CN', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 };
 
 const formatPercent = (value: unknown) => {
@@ -429,7 +544,7 @@ const getScreenHistoryTopCandidates = (item: AlphaSiftScreenHistoryItem) =>
     .slice(0, 3)
     .map((candidate) => [candidate.code, candidate.name].filter(Boolean).join(' '))
     .filter(Boolean)
-    .join('銆?) || '-';
+    .join(', ') || '-';
 
 const formatOpportunityPosition = (item: OpportunityOverview['opportunities'][number]) => {
   const budget = item.riskBudget || {};
@@ -519,6 +634,8 @@ const StockScreeningPage: React.FC = () => {
   const navigate = useNavigate();
   const watchlist = useWatchlist();
   const [restoredTask] = useState<PersistedScreenTask | null>(() => readPersistedScreenTask());
+  const [restoredOpportunityTask] = useState<PersistedOpportunityTask | null>(() => readPersistedOpportunityTask());
+  const [restoredOpportunityOverview] = useState<PersistedOpportunityOverview | null>(() => readPersistedOpportunityOverview());
   const [enabled, setEnabled] = useState(false);
   const [available, setAvailable] = useState(false);
   const [market, setMarket] = useState(restoredTask?.market || 'cn');
@@ -549,11 +666,28 @@ const StockScreeningPage: React.FC = () => {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(restoredTask?.taskId ?? null);
   const [taskProgress, setTaskProgress] = useState(restoredTask?.taskId ? 10 : 0);
   const [taskMessage, setTaskMessage] = useState(restoredTask?.taskId ? '正在恢复选股任务状态...' : '');
-  const [opportunityOverview, setOpportunityOverview] = useState<OpportunityOverview | null>(null);
-  const [loadingOpportunityOverview, setLoadingOpportunityOverview] = useState(false);
+  const [opportunityOverview, setOpportunityOverview] = useState<OpportunityOverview | null>(restoredOpportunityOverview?.overview ?? null);
+  const [loadingOpportunityOverview, setLoadingOpportunityOverview] = useState(Boolean(restoredOpportunityTask?.taskId));
   const [opportunityError, setOpportunityError] = useState('');
-  const [selectedOpportunityScope, setSelectedOpportunityScope] = useState<OpportunityScope>('balanced');
-  const [selectedOpportunityRiskProfile, setSelectedOpportunityRiskProfile] = useState<OpportunityRiskProfile>('balanced');
+  const [selectedOpportunityScope, setSelectedOpportunityScope] = useState<OpportunityScope>(
+    restoredOpportunityTask?.scope ?? restoredOpportunityOverview?.scope ?? 'balanced',
+  );
+  const [selectedOpportunityRiskProfile, setSelectedOpportunityRiskProfile] = useState<OpportunityRiskProfile>(
+    restoredOpportunityTask?.riskProfile ?? restoredOpportunityOverview?.riskProfile ?? 'balanced',
+  );
+  const [activeOpportunityTaskId, setActiveOpportunityTaskId] = useState<string | null>(restoredOpportunityTask?.taskId ?? null);
+  const [opportunityTaskProgress, setOpportunityTaskProgress] = useState(restoredOpportunityTask?.taskId ? 10 : 0);
+  const [opportunityTaskMessage, setOpportunityTaskMessage] = useState(restoredOpportunityTask?.taskId ? '正在恢复机会摘要刷新状态...' : '');
+  const [opportunitySnapshotMeta, setOpportunitySnapshotMeta] = useState<Pick<PersistedOpportunityOverview, 'market' | 'scope' | 'riskProfile' | 'savedAt'> | null>(
+    restoredOpportunityOverview
+      ? {
+          market: restoredOpportunityOverview.market,
+          scope: restoredOpportunityOverview.scope,
+          riskProfile: restoredOpportunityOverview.riskProfile,
+          savedAt: restoredOpportunityOverview.savedAt,
+        }
+      : null,
+  );
   const [opportunityNewsQuery, setOpportunityNewsQuery] = useState('');
   const [opportunityNewsTag, setOpportunityNewsTag] = useState('all');
   const [watchlistFeedbackCode, setWatchlistFeedbackCode] = useState<string | null>(null);
@@ -574,6 +708,20 @@ const StockScreeningPage: React.FC = () => {
   const selectedOpportunityRiskProfileLabel = useMemo(
     () => OPPORTUNITY_RISK_PROFILE_OPTIONS.find((item) => item.id === selectedOpportunityRiskProfile)?.label || '平衡',
     [selectedOpportunityRiskProfile],
+  );
+  const snapshotOpportunityScopeLabel = useMemo(
+    () => OPPORTUNITY_SCOPE_OPTIONS.find((item) => item.id === opportunitySnapshotMeta?.scope)?.label || '平衡配置',
+    [opportunitySnapshotMeta?.scope],
+  );
+  const snapshotOpportunityRiskProfileLabel = useMemo(
+    () => OPPORTUNITY_RISK_PROFILE_OPTIONS.find((item) => item.id === opportunitySnapshotMeta?.riskProfile)?.label || '平衡',
+    [opportunitySnapshotMeta?.riskProfile],
+  );
+  const opportunityFiltersDirty = Boolean(
+    opportunitySnapshotMeta
+    && (opportunitySnapshotMeta.market !== market
+      || opportunitySnapshotMeta.scope !== selectedOpportunityScope
+      || opportunitySnapshotMeta.riskProfile !== selectedOpportunityRiskProfile),
   );
   const opportunityNewsItems = useMemo(() => opportunityOverview?.keyNews || [], [opportunityOverview]);
   const opportunityNewsTags = useMemo(
@@ -793,22 +941,58 @@ const StockScreeningPage: React.FC = () => {
     });
   }, [navigate]);
 
-  const loadOpportunityOverview = useCallback(async () => {
+  const applyOpportunityOverview = useCallback((
+    overview: OpportunityOverview,
+    meta: {
+      market: string;
+      scope: OpportunityScope;
+      riskProfile: OpportunityRiskProfile;
+      savedAt?: string;
+    },
+  ) => {
+    const snapshot = {
+      overview,
+      market: meta.market,
+      scope: meta.scope,
+      riskProfile: meta.riskProfile,
+      savedAt: meta.savedAt || new Date().toISOString(),
+    };
+    setOpportunityOverview(overview);
+    setOpportunitySnapshotMeta({
+      market: snapshot.market,
+      scope: snapshot.scope,
+      riskProfile: snapshot.riskProfile,
+      savedAt: snapshot.savedAt,
+    });
+    persistOpportunityOverview(snapshot);
+  }, []);
+
+  const refreshOpportunityOverview = useCallback(async () => {
     setLoadingOpportunityOverview(true);
     setOpportunityError('');
+    setOpportunityTaskProgress(0);
+    setOpportunityTaskMessage('正在提交机会摘要刷新任务...');
     try {
-      const result = await opportunitiesApi.getOverview({
+      const accepted = await opportunitiesApi.startScan({
         market,
         scope: selectedOpportunityScope,
-        limit: 6,
         riskProfile: selectedOpportunityRiskProfile,
+        watchlistOnly: false,
+        maxResults: 6,
       });
-      setOpportunityOverview(result);
+      persistOpportunityTask({
+        taskId: accepted.taskId,
+        market,
+        scope: selectedOpportunityScope,
+        riskProfile: selectedOpportunityRiskProfile,
+        maxResults: accepted.maxResults,
+      });
+      setActiveOpportunityTaskId(accepted.taskId);
+      setOpportunityTaskProgress(0);
+      setOpportunityTaskMessage(accepted.message || '机会摘要刷新任务已提交');
     } catch (err) {
-      setOpportunityOverview(null);
-      setOpportunityError(toApiErrorMessage(err, '机会摘要加载失败，请稍后重试。'));
-    } finally {
       setLoadingOpportunityOverview(false);
+      setOpportunityError(toApiErrorMessage(err, '机会摘要刷新失败，请稍后重试。'));
     }
   }, [market, selectedOpportunityRiskProfile, selectedOpportunityScope]);
 
@@ -848,13 +1032,15 @@ const StockScreeningPage: React.FC = () => {
         }
         setEnabled(status.enabled);
         setAvailable(status.available);
-        if (status.enabled && status.available) {
-          void loadStrategies();
-          void loadHotspots(false);
+        if (status.enabled) {
           void loadScreenHistory();
         } else {
           setScreenHistory([]);
           setScreenHistoryError('');
+        }
+        if (status.enabled && status.available) {
+          void loadStrategies();
+          void loadHotspots(false);
         }
       })
       .catch(() => {
@@ -869,14 +1055,99 @@ const StockScreeningPage: React.FC = () => {
   }, [loadHotspots, loadScreenHistory, loadStrategies]);
 
   useEffect(() => {
-    void loadOpportunityOverview();
-  }, [loadOpportunityOverview]);
-
-  useEffect(() => {
     if (!watchlist.actionMessage) {
       setWatchlistFeedbackCode(null);
     }
   }, [watchlist.actionMessage]);
+
+  useEffect(() => {
+    if (!activeOpportunityTaskId) {
+      return undefined;
+    }
+
+    const pollingTaskId = activeOpportunityTaskId;
+    let active = true;
+    let timer: ReturnType<typeof window.setTimeout> | undefined;
+
+    function finishTask() {
+      clearPersistedOpportunityTask();
+      setActiveOpportunityTaskId(null);
+      setLoadingOpportunityOverview(false);
+    }
+
+    function applyTaskStatus(task: OpportunityScanTaskStatus) {
+      const nextProgress = Number(task.progress ?? 0);
+      setOpportunityTaskProgress(Number.isFinite(nextProgress) ? nextProgress : 0);
+      setOpportunityTaskMessage(task.message || '');
+
+      if (task.status === 'completed') {
+        if (task.result) {
+          applyOpportunityOverview(task.result, {
+            market: (task.market as string) || market,
+            scope: (task.scope as OpportunityScope) || selectedOpportunityScope,
+            riskProfile: (task.riskProfile as OpportunityRiskProfile) || selectedOpportunityRiskProfile,
+          });
+          setOpportunityError('');
+        } else {
+          setOpportunityError('机会摘要任务已完成，但服务端未返回摘要结果。');
+        }
+        finishTask();
+        return;
+      }
+
+      if (task.status === 'failed') {
+        setOpportunityError(task.error || task.message || '机会摘要刷新失败，请稍后重试。');
+        finishTask();
+        return;
+      }
+
+      if (task.status === 'pending' || task.status === 'processing') {
+        setLoadingOpportunityOverview(true);
+        timer = window.setTimeout(pollTask, OPPORTUNITY_TASK_POLL_INTERVAL_MS);
+        return;
+      }
+
+      setOpportunityError(`机会摘要任务返回未知状态：${task.status || 'unknown'}`);
+      finishTask();
+    }
+
+    async function pollTask() {
+      try {
+        const task = await opportunitiesApi.getScanTask(pollingTaskId);
+        if (!active) {
+          return;
+        }
+        applyTaskStatus(task);
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        const parsedError = getParsedApiError(err);
+        setOpportunityError(formatParsedApiError(parsedError) || '机会摘要状态获取失败，请稍后重试。');
+        if (parsedError.status === 404) {
+          finishTask();
+          return;
+        }
+        setLoadingOpportunityOverview(true);
+        timer = window.setTimeout(pollTask, OPPORTUNITY_TASK_POLL_INTERVAL_MS);
+      }
+    }
+
+    void pollTask();
+
+    return () => {
+      active = false;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [
+    activeOpportunityTaskId,
+    applyOpportunityOverview,
+    market,
+    selectedOpportunityRiskProfile,
+    selectedOpportunityScope,
+  ]);
 
   useEffect(() => {
     if (!activeTaskId) {
@@ -1110,7 +1381,7 @@ const StockScreeningPage: React.FC = () => {
             variant="secondary"
             isLoading={loadingOpportunityOverview}
             loadingText="刷新中..."
-            onClick={() => void loadOpportunityOverview()}
+            onClick={() => void refreshOpportunityOverview()}
           >
             <RefreshCw className="h-4 w-4" />
             刷新机会摘要
@@ -1170,6 +1441,34 @@ const StockScreeningPage: React.FC = () => {
           </div>
         ) : null}
 
+        {loadingOpportunityOverview ? (
+          <div className="mt-4 rounded-xl border border-cyan/20 bg-cyan/5 px-4 py-3 text-sm text-foreground">
+            <p className="font-medium">机会摘要正在后台刷新</p>
+            <p className="mt-1 text-xs text-secondary-text">
+              {opportunityTaskMessage || '正在整理板块、ETF、个股与新闻催化，请稍候。'}
+              {Number.isFinite(opportunityTaskProgress) ? ` · 进度 ${Math.max(0, Math.min(100, opportunityTaskProgress))}%` : ''}
+            </p>
+            {opportunityOverview ? (
+              <p className="mt-1 text-xs text-secondary-text">
+                页面继续展示上次成功内容，刷新完成后会自动替换。
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {!loadingOpportunityOverview && opportunitySnapshotMeta ? (
+          <div className="mt-4 rounded-xl border border-border bg-surface/60 px-4 py-3 text-xs text-secondary-text">
+            上次刷新：{formatDateTime(opportunitySnapshotMeta.savedAt)} · 偏好 {snapshotOpportunityScopeLabel} · 风险 {snapshotOpportunityRiskProfileLabel}
+            {opportunityFiltersDirty ? ' · 当前筛选已变更，点击“刷新机会摘要”后更新内容。' : ''}
+          </div>
+        ) : null}
+
+        {!loadingOpportunityOverview && !opportunityOverview && !opportunityError ? (
+          <div className="mt-4 rounded-xl border border-dashed border-border bg-surface/70 px-4 py-4 text-sm text-secondary-text">
+            进入页面后不再自动刷新机会摘要，避免新闻与外部引擎请求拖慢首屏。需要时点击右上角“刷新机会摘要”，后台异步生成后会自动展示，并保留最近一次成功结果。
+          </div>
+        ) : null}
+
         {!opportunityError && opportunityOverview && !opportunityOverview.enabled ? (
           <div className="mt-4 rounded-xl border border-dashed border-border bg-surface/70 px-4 py-4 text-sm text-secondary-text">
             机会引擎未开启。需要使用时在 `.env` 设置 OPPORTUNITY_ENGINE_ENABLED=true 后重启服务；关闭状态不影响现有选股和分析流程。
@@ -1187,7 +1486,7 @@ const StockScreeningPage: React.FC = () => {
                 {opportunityOverview.marketTemperature?.label || 'unknown'} · 数据质量 {opportunityOverview.dataQuality?.level || '-'}
               </p>
               <p className="mt-3 text-xs text-secondary-text">
-                偏好 {selectedOpportunityScopeLabel} · 风险 {selectedOpportunityRiskProfileLabel}
+                偏好 {snapshotOpportunityScopeLabel} · 风险 {snapshotOpportunityRiskProfileLabel}
               </p>
               <p className="mt-3 text-xs text-secondary-text">
                 自选 {opportunityOverview.portfolioContext?.watchlistCount ?? 0} · 持仓 {opportunityOverview.portfolioContext?.holdingCount ?? 0}
@@ -1850,7 +2149,7 @@ const StockScreeningPage: React.FC = () => {
 
         {screenHistory.length === 0 ? (
           <div className="rounded-xl border border-dashed border-border bg-surface/70 px-5 py-6 text-sm text-secondary-text">
-            暂无选股历史。运行一次选股后，这里会显示最近结果。
+            {enabled ? '暂无选股历史。运行一次选股后，这里会显示最近结果。' : 'AlphaSift 开启后可查看选股历史。'}
           </div>
         ) : (
           <div className="grid gap-3">

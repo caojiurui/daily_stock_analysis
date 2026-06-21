@@ -223,6 +223,49 @@ class OpportunityServicePhase234TestCase(unittest.TestCase):
         self.assertIn("机器人", top_sector_names)
         self.assertTrue(any(item["source"] == "ths_summary" for item in payload["key_news"]))
 
+    def test_overview_merges_ths_flashnews_into_key_news(self) -> None:
+        fetcher = unittest.mock.MagicMock()
+        fetcher.get_sector_rankings.return_value = (
+            [{"name": "AI绠楀姏", "change_pct": 5.6, "heat_score": 88}],
+            [],
+        )
+        fetcher.get_concept_rankings.return_value = ([], [])
+        fetcher.get_hot_stocks.return_value = []
+
+        with patch.object(OpportunityService, "_watchlist_symbols", return_value=[]), patch.object(
+            OpportunityService, "_holding_symbols", return_value=[]
+        ), patch(
+            "src.extensions.opportunity.service._build_hotspot_event_routes_from_search",
+            return_value=[],
+        ), patch(
+            "src.extensions.opportunity.service.ThsExternalInfoProvider.collect",
+            return_value={
+                "industry_rows": [],
+                "concept_rows": [
+                    {
+                        "name": "AI绠楀姏",
+                        "heat_score": 80,
+                        "news_score": 68,
+                        "external_score": 80,
+                        "ths_flashnews_event": "2026-06-21：同花顺重要快讯",
+                        "ths_flashnews_title": "同花顺重要快讯",
+                        "ths_flashnews_summary": "AI算力板块盘中活跃",
+                        "ths_flashnews_published_at": "2026-06-21T10:00:00+08:00",
+                        "ths_flashnews_url": "https://example.test/flash",
+                    }
+                ],
+                "stock_signals": {},
+                "warnings": [],
+            },
+        ):
+            payload = OpportunityService(config=self._config(), fetcher_manager=fetcher).overview(
+                market="cn",
+                scope="balanced",
+                limit=5,
+            )
+
+        self.assertTrue(any(item["source"] == "ths_flashnews" for item in payload["key_news"]))
+
     def test_overview_applies_ths_stock_signal_boosts_to_hot_stocks(self) -> None:
         fetcher = unittest.mock.MagicMock()
         fetcher.get_sector_rankings.return_value = (

@@ -135,7 +135,22 @@ export type OpportunityScanAccepted = {
   message: string;
   market: string;
   scope: string;
+  riskProfile: 'conservative' | 'balanced' | 'aggressive' | string;
   maxResults: number;
+};
+
+export type OpportunityScanTaskStatus = {
+  taskId: string;
+  traceId?: string | null;
+  status: string;
+  progress: number;
+  message?: string | null;
+  error?: string | null;
+  result?: OpportunityOverview | null;
+  market?: string | null;
+  scope?: string | null;
+  riskProfile?: 'conservative' | 'balanced' | 'aggressive' | string | null;
+  maxResults?: number | null;
 };
 
 export const opportunitiesApi = {
@@ -161,15 +176,22 @@ export const opportunitiesApi = {
   async startScan(payload: {
     market: string;
     scope: string;
+    riskProfile: 'conservative' | 'balanced' | 'aggressive' | string;
     watchlistOnly: boolean;
     maxResults: number;
   }): Promise<OpportunityScanAccepted> {
     const response = await apiClient.post<Record<string, unknown>>('/api/v1/opportunities/scan', {
       market: payload.market,
       scope: payload.scope,
+      risk_profile: payload.riskProfile,
       watchlist_only: payload.watchlistOnly,
       max_results: payload.maxResults,
     });
     return toCamelCase<OpportunityScanAccepted>(response.data);
+  },
+
+  async getScanTask(taskId: string): Promise<OpportunityScanTaskStatus> {
+    const response = await apiClient.get<Record<string, unknown>>(`/api/v1/opportunities/tasks/${taskId}`);
+    return toCamelCase<OpportunityScanTaskStatus>(response.data);
   },
 };

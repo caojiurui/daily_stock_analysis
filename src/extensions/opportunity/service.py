@@ -269,6 +269,12 @@ class OpportunityService:
                         "ths_board_type",
                         "ths_summary_date",
                         "ths_summary_event",
+                        "ths_flashnews_tag_id",
+                        "ths_flashnews_title",
+                        "ths_flashnews_summary",
+                        "ths_flashnews_published_at",
+                        "ths_flashnews_url",
+                        "ths_flashnews_event",
                         "ths_leading_stock",
                         "ths_component_count",
                         "ths_total_amount",
@@ -289,8 +295,24 @@ class OpportunityService:
     ) -> List[Dict[str, Any]]:
         combined = list(key_news or [])
         for row in concept_rows or []:
-            event = str(row.get("ths_summary_event") or "").strip()
+            flashnews_event = str(row.get("ths_flashnews_event") or "").strip()
+            flashnews_title = str(row.get("ths_flashnews_title") or "").strip()
+            flashnews_url = str(row.get("ths_flashnews_url") or "").strip()
+            flashnews_published_at = str(row.get("ths_flashnews_published_at") or "").strip()
             topic = str(row.get("name") or "").strip()
+            if flashnews_event and topic:
+                combined.append(
+                    {
+                        "title": flashnews_event,
+                        "source": "ths_flashnews",
+                        "url": flashnews_url,
+                        "published_at": flashnews_published_at or None,
+                        "score": max(float(row.get("news_score") or 0.0), 68.0),
+                        "topics": [topic],
+                        "summary": str(row.get("ths_flashnews_summary") or "").strip() or flashnews_title,
+                    }
+                )
+            event = str(row.get("ths_summary_event") or "").strip()
             published_at = str(row.get("ths_summary_date") or "").strip()
             if not event or not topic:
                 continue

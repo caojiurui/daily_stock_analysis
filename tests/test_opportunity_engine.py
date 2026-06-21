@@ -7,6 +7,7 @@ from src.extensions.opportunity.scoring import (
     normalize_sector_snapshots,
     score_sector,
 )
+from src.extensions.opportunity import ths_provider
 from src.extensions.opportunity.ths_provider import ThsExternalInfoProvider
 
 
@@ -92,3 +93,91 @@ def test_ths_provider_collect_returns_safe_empty_payload_when_loader_fails(monke
     assert payload["concept_rows"] == []
     assert payload["stock_signals"] == {}
     assert any(str(item).startswith("ths_provider_failed:ths_industry_summary:") for item in payload["warnings"])
+
+
+def test_fetch_ths_flashnews_items_parses_response_shape(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status_code": 0,
+                "data": {
+                    "list": [
+                        {
+                            "id": 1,
+                            "seq": 677558987,
+                            "title": "碳酸锂期货主力合约跌超4%",
+                            "summary": "看跌期权大涨",
+                            "shareUrl": "https://example.test/item",
+                            "createTime": 1781751613,
+                        }
+                    ]
+                },
+            }
+
+    def _fake_get(url, *, params, headers, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("src.extensions.opportunity.ths_provider.requests.get", _fake_get)
+
+    items = ths_provider.fetch_ths_flashnews_items(tag_id="62857", limit=1, timeout_seconds=2)
+
+    assert captured["params"]["tagId"] == "62857"
+    assert captured["headers"]["Pragma"] == "no-cache"
+    assert captured["timeout"] == 2
+    assert len(items) == 1
+    assert items[0]["title"] == "碳酸锂期货主力合约跌超4%"
+    assert items[0]["url"] == "https://example.test/item"
+    assert items[0]["published_at"]
+
+
+def test_collect_enriches_concept_rows_with_flashnews(monkeypatch):
+    provider = ThsExternalInfoProvider(timeout_seconds=1)
+    monkeypatch.setattr(
+        ThsExternalInfoProvider,
+        "_load_industry_rows",
+        staticmethod(lambda limit: []),
+    )
+    monkeypatch.setattr(
+        ThsExternalInfoProvider,
+        "_load_concept_rows",
+        staticmethod(
+            lambda limit: [
+                {
+                    "name": "AI算力",
+                    "heat_score": 80,
+                    "news_score": 62,
+                    "external_score": 80,
+                    "ths_summary_date": "2026-06-21",
+                    "ths_summary_event": "服务器需求持续提升",
+                    "ths_flashnews_tag_id": "62857",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(ThsExternalInfoProvider, "_load_stock_signals", staticmethod(lambda limit: {}))
+    monkeypatch.setattr(
+        "src.extensions.opportunity.ths_provider.fetch_ths_flashnews_items",
+        lambda **kwargs: [
+            {
+                "title": "同花顺重要快讯",
+                "summary": "AI算力板块盘中活跃",
+                "url": "https://example.test/flash",
+                "published_at": "2026-06-21T10:00:00+08:00",
+            }
+        ],
+    )
+
+    payload = provider.collect(limit=5)
+
+    assert payload["concept_rows"][0]["ths_flashnews_title"] == "同花顺重要快讯"
+    assert payload["concept_rows"][0]["ths_flashnews_url"] == "https://example.test/flash"
+    assert payload["concept_rows"][0]["news_score"] >= 68.0

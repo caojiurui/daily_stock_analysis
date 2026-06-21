@@ -22,6 +22,7 @@ router = APIRouter()
 class OpportunityScanRequest(BaseModel):
     market: str = Field("all", pattern="^(cn|hk|us|all)$")
     scope: str = Field("balanced", pattern="^(balanced|etf|stock)$")
+    risk_profile: str = Field("balanced", pattern="^(conservative|balanced|aggressive)$")
     watchlist_only: bool = False
     max_results: int = Field(10, ge=1, le=50)
 
@@ -33,6 +34,7 @@ class OpportunityScanAccepted(BaseModel):
     message: str
     market: str
     scope: str
+    risk_profile: str
     max_results: int
 
 
@@ -44,6 +46,10 @@ class OpportunityScanTaskStatus(BaseModel):
     message: Optional[str] = None
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    market: Optional[str] = None
+    scope: Optional[str] = None
+    risk_profile: Optional[str] = None
+    max_results: Optional[int] = None
 
 
 def _service(config: Config) -> OpportunityService:
@@ -89,6 +95,7 @@ def opportunity_start_scan_task(
         result = _service(config).scan(
             market=request.market,
             scope=request.scope,
+            risk_profile=request.risk_profile,
             watchlist_only=request.watchlist_only,
             max_results=request.max_results,
         )
@@ -111,6 +118,7 @@ def opportunity_start_scan_task(
         message=task.message or "机会扫描任务已提交",
         market=request.market,
         scope=request.scope,
+        risk_profile=request.risk_profile,
         max_results=request.max_results,
     )
 
@@ -130,4 +138,8 @@ def opportunity_scan_task_status(task_id: str) -> OpportunityScanTaskStatus:
         message=task.message,
         error=task.error,
         result=result,
+        market=result.get("market") if isinstance(result, dict) else None,
+        scope=result.get("scope") if isinstance(result, dict) else None,
+        risk_profile=result.get("risk_profile") if isinstance(result, dict) else None,
+        max_results=result.get("limit") if isinstance(result, dict) else None,
     )

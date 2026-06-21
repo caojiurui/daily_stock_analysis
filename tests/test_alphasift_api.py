@@ -1243,6 +1243,7 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
     def test_hotspot_route_is_grouped_by_daily_markers(self) -> None:
         provider = alphasift_service.DsaEastMoneyHotspotProvider()
+        provider._fetch_ths_flashnews_event = MagicMock(return_value="")
         provider._fetch_ths_summary_event = MagicMock(return_value="2026-06-12：政策催化")
         summary = {
             "板块名称": "AI算力",
@@ -1262,12 +1263,44 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
     def test_hotspot_route_does_not_invent_metal_catalyst_hint(self) -> None:
         provider = alphasift_service.DsaEastMoneyHotspotProvider()
+        provider._fetch_ths_flashnews_event = MagicMock(return_value="")
         provider._fetch_ths_summary_event = MagicMock(return_value="")
 
         route = provider._build_hotspot_route("钼", {})
 
         self.assertEqual(route[0]["source"], "fallback")
         self.assertNotIn("以钼代钨", route[0]["description"])
+
+    def test_hotspot_route_prefers_ths_flashnews_signal(self) -> None:
+        provider = alphasift_service.DsaEastMoneyHotspotProvider()
+        provider._fetch_ths_flashnews_event = MagicMock(return_value="2026-06-21：同花顺重要快讯")
+        provider._fetch_ths_summary_event = MagicMock(return_value="2026-06-12：政策催化")
+
+        route = provider._build_hotspot_route("AI绠楀姏", {})
+
+        self.assertEqual(route[0]["source"], "ths_flashnews")
+        self.assertEqual(route[0]["date"], "2026-06-21")
+
+    def test_fetch_ths_flashnews_event_uses_tag_id_from_ths_info(self) -> None:
+        provider = alphasift_service.DsaEastMoneyHotspotProvider()
+        provider._fetch_ths_info = MagicMock(return_value={"tagId": "62857"})
+        provider._session = SimpleNamespace()
+
+        with patch(
+            "src.services.alphasift_service.fetch_ths_flashnews_items",
+            return_value=[
+                {
+                    "title": "同花顺重要快讯",
+                    "summary": "AI算力板块盘中活跃",
+                    "url": "https://example.test/flash",
+                    "published_at": "2026-06-21T10:00:00+08:00",
+                }
+            ],
+        ) as fetch_mock:
+            text = provider._fetch_ths_flashnews_event("AI绠楀姏")
+
+        self.assertIn("2026-06-21", text)
+        fetch_mock.assert_called_once()
 
     def test_hotspot_detail_uses_constituent_fallback_when_board_change_summary_fails(self) -> None:
         import pandas as pd
@@ -2764,6 +2797,31 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(runtime_env["LITELLM_MODEL"], "gemini/gemini-3-flash-preview")
         self.assertEqual(runtime_env["LITELLM_FALLBACK_MODELS"], "deepseek/deepseek-chat")
         self.assertEqual(runtime_env["LLM_CHANNELS"], "gemini,deepseek")
+
+    def test_build_alphasift_context_omits_temperature_for_gpt5_family(self) -> None:
+        config = Config(
+            alphasift_enabled=True,
+            alphasift_install_spec=DEFAULT_ALPHASIFT_TEST_SPEC,
+            litellm_model="openai/gpt5.5-ferr",
+            llm_temperature=0.0,
+        )
+
+        context = alphasift_service._build_alphasift_context(config, max_results=5)
+
+        self.assertIsNone(context["llm"]["temperature"])
+
+    def test_runtime_env_skips_llm_temperature_for_gpt5_family(self) -> None:
+        config = Config(
+            alphasift_enabled=True,
+            alphasift_install_spec=DEFAULT_ALPHASIFT_TEST_SPEC,
+            litellm_model="openai/gpt5.5-ferr",
+            llm_temperature=0.0,
+        )
+
+        with patch.dict(alphasift_service.os.environ, {"LLM_TEMPERATURE": "0"}, clear=False):
+            env = alphasift_service._build_alphasift_runtime_env(config, max_results=5)
+
+        self.assertNotIn("LLM_TEMPERATURE", env)
         context = captured["context"]
         self.assertIsInstance(context, dict)
         self.assertEqual(context["llm"]["fallback_models"], ["deepseek/deepseek-chat"])

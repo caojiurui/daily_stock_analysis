@@ -27,6 +27,13 @@ from pydantic import BaseModel, Field
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
+from src.extensions.opportunity.ths_provider import (
+    extract_ths_flashnews_tag_id,
+    fetch_ths_flashnews_items,
+    format_ths_flashnews_event,
+)
+from src.llm.errors import call_litellm_with_param_recovery
+from src.llm.generation_params import apply_litellm_generation_params, resolve_litellm_temperature_directive
 
 logger = logging.getLogger(__name__)
 
@@ -2024,14 +2031,18 @@ def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] =
         put(key, value)
 
     litellm_model, fallback_models = _resolve_alphasift_llm_models(config)
+    channels = _normalize_dsa_llm_channels(config)
+    model_list = _build_alphasift_litellm_model_list(config, channels)
+    temperature_directive = resolve_litellm_temperature_directive(
+        litellm_model,
+        model_list=model_list,
+    )
     put("LITELLM_MODEL", litellm_model)
     if fallback_models:
         put("LITELLM_FALLBACK_MODELS", ",".join(fallback_models))
     put("LITELLM_CONFIG", config.litellm_config_path)
-    if os.getenv("LLM_TEMPERATURE") not in (None, ""):
+    if os.getenv("LLM_TEMPERATURE") not in (None, "") and not temperature_directive.omit_temperature:
         put("LLM_TEMPERATURE", config.llm_temperature)
-
-    channels = _normalize_dsa_llm_channels(config)
     if channels:
         put("LLM_CHANNELS", ",".join(channel["name"] for channel in channels))
         for channel in channels:
@@ -2624,6 +2635,15 @@ class DsaEastMoneyHotspotProvider:
                 "published_at": day,
             }
 
+        ths_flashnews = self._fetch_ths_flashnews_event(topic)
+        if ths_flashnews:
+            event_date = self._extract_route_date(ths_flashnews) or today
+            put_daily_item(
+                date=event_date,
+                title="题材驱动",
+                description=ths_flashnews,
+                source="ths_flashnews",
+            )
         ths_event = self._fetch_ths_summary_event(topic)
         if ths_event:
             event_date = self._extract_route_date(ths_event) or today
@@ -2712,6 +2732,24 @@ class DsaEastMoneyHotspotProvider:
         date = _env_text(row.get("日期"))
         event = _env_text(row.get("驱动事件"))
         return f"{date}：{event}" if date and event else event
+
+    def _fetch_ths_flashnews_event(self, topic: str) -> str:
+        info = self._fetch_ths_info(topic)
+        tag_id = extract_ths_flashnews_tag_id(info)
+        if not tag_id:
+            return ""
+        try:
+            items = fetch_ths_flashnews_items(
+                tag_id=tag_id,
+                limit=1,
+                timeout_seconds=self._HTTP_TIMEOUT_SECONDS,
+                session=self._session,
+            )
+        except Exception:
+            return ""
+        if not items:
+            return ""
+        return format_ths_flashnews_event(items[0], max_chars=DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS)
 
     def _fetch_ths_info(self, topic: str) -> Dict[str, str]:
         import akshare as ak
@@ -2958,13 +2996,26 @@ def _build_alphasift_context(config: Config, *, max_results: Optional[int] = Non
     # 参见 https://docs.litellm.ai/docs/proxy/configs#the-model_list-key
     channels = _normalize_dsa_llm_channels(config)
     litellm_model, fallback_models = _resolve_alphasift_llm_models(config)
+    model_list = _build_alphasift_litellm_model_list(config, channels)
+    temperature_directive = resolve_litellm_temperature_directive(
+        litellm_model,
+        model_list=model_list,
+    )
     return {
         "llm": {
             "model": litellm_model,
             "fallback_models": fallback_models,
-            "temperature": config.llm_temperature,
+            "temperature": (
+                None
+                if temperature_directive.omit_temperature
+                else (
+                    temperature_directive.temperature
+                    if temperature_directive.temperature is not None
+                    else config.llm_temperature
+                )
+            ),
             "channels": channels,
-            "model_list": _build_alphasift_litellm_model_list(config, channels),
+            "model_list": model_list,
             "litellm_config_path": config.litellm_config_path or "",
             "candidate_context_enabled": False,
             "candidate_multiplier": DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER,

@@ -75,6 +75,7 @@ describe('opportunitiesApi', () => {
         message: '机会扫描任务已提交',
         market: 'cn',
         scope: 'balanced',
+        risk_profile: 'aggressive',
         max_results: 5,
       },
     });
@@ -82,6 +83,7 @@ describe('opportunitiesApi', () => {
     const result = await opportunitiesApi.startScan({
       market: 'cn',
       scope: 'balanced',
+      riskProfile: 'aggressive',
       watchlistOnly: false,
       maxResults: 5,
     });
@@ -89,10 +91,42 @@ describe('opportunitiesApi', () => {
     expect(post).toHaveBeenCalledWith('/api/v1/opportunities/scan', {
       market: 'cn',
       scope: 'balanced',
+      risk_profile: 'aggressive',
       watchlist_only: false,
       max_results: 5,
     });
     expect(result.taskId).toBe('op-task-1');
+    expect(result.riskProfile).toBe('aggressive');
     expect(result.maxResults).toBe(5);
+  });
+
+  it('loads async scan task status', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        task_id: 'op-task-1',
+        trace_id: 'op-task-1',
+        status: 'completed',
+        progress: 100,
+        message: '机会扫描完成',
+        market: 'cn',
+        scope: 'balanced',
+        risk_profile: 'balanced',
+        max_results: 6,
+        result: {
+          enabled: true,
+          market_temperature: { score: 70, label: 'warm' },
+          top_sectors: [],
+          opportunities: [],
+          data_quality: { level: 'partial' },
+        },
+      },
+    });
+
+    const result = await opportunitiesApi.getScanTask('op-task-1');
+
+    expect(get).toHaveBeenCalledWith('/api/v1/opportunities/tasks/op-task-1');
+    expect(result.status).toBe('completed');
+    expect(result.riskProfile).toBe('balanced');
+    expect(result.result?.marketTemperature.score).toBe(70);
   });
 });

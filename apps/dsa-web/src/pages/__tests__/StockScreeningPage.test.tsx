@@ -7,14 +7,16 @@ const {
   getAlphaSiftStatus,
   getHotspotDetail,
   getHotspots,
-  getOpportunityOverview,
+  getOpportunityScanTask,
   getStrategies,
   getScreenHistory,
   getScreenHistoryDetail,
   getScreenTask,
   navigate,
+  resetOpportunityTaskResult,
   resetLastScreenResult,
   screenStocks,
+  startOpportunityScan,
   startScreenTask,
   setWatchlistActionMessage,
   watchlistIsInWatchlist,
@@ -22,6 +24,7 @@ const {
   watchlistToggleWatchlist,
 } = vi.hoisted(() => {
   let lastScreenResult: unknown = null;
+  let lastOpportunityResult: unknown = null;
   let watchlistActionMessage: string | null = null;
   const getScreenHistory = vi.fn();
   const getScreenHistoryDetail = vi.fn();
@@ -49,17 +52,48 @@ const {
       result: lastScreenResult,
     };
   });
+  const startOpportunityScan = vi.fn(async (payload: unknown) => {
+    void payload;
+    return {
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'pending',
+      message: '机会扫描任务已提交',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+    };
+  });
+  const getOpportunityScanTask = vi.fn(async (taskId: string) => {
+    void taskId;
+    return {
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      result: lastOpportunityResult,
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+    };
+  });
   return {
     enableAlphaSift: vi.fn(),
     getAlphaSiftStatus: vi.fn(),
     getHotspotDetail: vi.fn(),
     getHotspots: vi.fn(),
-    getOpportunityOverview: vi.fn(),
+    getOpportunityScanTask,
     getStrategies: vi.fn(),
     getScreenHistory,
     getScreenHistoryDetail,
     getScreenTask,
     navigate: vi.fn(),
+    resetOpportunityTaskResult: () => {
+      lastOpportunityResult = null;
+    },
     resetLastScreenResult: () => {
       lastScreenResult = null;
     },
@@ -67,6 +101,7 @@ const {
       watchlistActionMessage = value;
     },
     screenStocks,
+    startOpportunityScan,
     startScreenTask,
     watchlistIsInWatchlist: vi.fn((_: string) => false),
     watchlistToggleWatchlist: vi.fn(),
@@ -109,7 +144,8 @@ vi.mock('../../api/alphasift', () => ({
 
 vi.mock('../../api/opportunities', () => ({
   opportunitiesApi: {
-    getOverview: (payload: unknown) => getOpportunityOverview(payload),
+    getScanTask: (taskId: string) => getOpportunityScanTask(taskId),
+    startScan: (payload: unknown) => startOpportunityScan(payload),
   },
 }));
 
@@ -150,14 +186,16 @@ describe('StockScreeningPage', () => {
     getAlphaSiftStatus.mockReset();
     getHotspotDetail.mockReset();
     getHotspots.mockReset();
-    getOpportunityOverview.mockReset();
+    getOpportunityScanTask.mockReset();
     getStrategies.mockReset();
     getScreenHistory.mockReset();
     getScreenHistoryDetail.mockReset();
     getScreenTask.mockClear();
     navigate.mockReset();
+    resetOpportunityTaskResult();
     resetLastScreenResult();
     screenStocks.mockReset();
+    startOpportunityScan.mockClear();
     startScreenTask.mockClear();
     watchlistIsInWatchlist.mockReset();
     watchlistIsInWatchlist.mockReturnValue(false);
@@ -209,15 +247,30 @@ describe('StockScreeningPage', () => {
       stockCount: 1,
     });
     getHotspots.mockResolvedValue({ enabled: true, provider: 'akshare', hotspots: [], hotspotCount: 0 });
-    getOpportunityOverview.mockResolvedValue({
-      enabled: false,
-      marketTemperature: { score: 0, label: 'disabled' },
-      topSectors: [],
-      opportunities: [],
-      dataQuality: { level: 'disabled', warnings: ['opportunity_engine_disabled'] },
-      warnings: ['opportunity_engine_disabled'],
+    startOpportunityScan.mockResolvedValue({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'pending',
+      message: '机会扫描任务已提交',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+    });
+    getOpportunityScanTask.mockResolvedValue({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      result: null,
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
     });
     window.sessionStorage.clear();
+    window.localStorage.clear();
   });
 
   it('shows enabled opportunity overview above AlphaSift screening', async () => {
@@ -226,7 +279,17 @@ describe('StockScreeningPage', () => {
       available: true,
       installSpecIsDefault: true,
     });
-    getOpportunityOverview.mockResolvedValueOnce({
+    getOpportunityScanTask.mockResolvedValueOnce({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+      result: {
       enabled: true,
       marketTemperature: { score: 72, label: 'warm' },
       topSectors: [{ name: 'AI算力', score: 88, changePct: 5.2 }],
@@ -245,20 +308,78 @@ describe('StockScreeningPage', () => {
       ],
       dataQuality: { level: 'partial', warnings: [] },
       warnings: [],
+      },
     });
 
     render(<StockScreeningPage />);
 
     expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    expect(startOpportunityScan).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
     expect(screen.getByText('72')).toBeInTheDocument();
     expect(screen.getByText('宁德时代')).toBeInTheDocument();
     expect(screen.getByText(/建议仓位 10-20%/)).toBeInTheDocument();
-    expect(getOpportunityOverview).toHaveBeenCalledWith({
+    expect(startOpportunityScan).toHaveBeenCalledWith({
       market: 'cn',
       scope: 'balanced',
-      limit: 6,
       riskProfile: 'balanced',
+      watchlistOnly: false,
+      maxResults: 6,
     });
+  });
+
+  it('does not auto-refresh opportunity overview on page entry', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    expect(startOpportunityScan).not.toHaveBeenCalled();
+    expect(screen.getByText(/进入页面后不再自动刷新机会摘要/)).toBeInTheDocument();
+  });
+
+  it('restores the last persisted opportunity overview without auto-refreshing', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    window.localStorage.setItem('dsa.alphasift.opportunityOverview.v1', JSON.stringify({
+      overview: {
+        enabled: true,
+        marketTemperature: { score: 66, label: 'warm' },
+        topSectors: [],
+        opportunities: [
+          {
+            code: '512480',
+            name: '半导体ETF',
+            instrumentType: 'etf',
+            score: 79,
+            reason: 'persisted idea',
+            sector: 'AI算力',
+            riskBudget: { instrumentType: 'etf', positionMinPct: 20, positionMaxPct: 35 },
+            chipStatus: { status: 'unavailable' },
+            dataQuality: 'partial',
+          },
+        ],
+        dataQuality: { level: 'partial', warnings: [] },
+        warnings: [],
+      },
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      savedAt: '2026-06-21T12:34:00.000Z',
+    }));
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('半导体ETF')).toBeInTheDocument();
+    expect(startOpportunityScan).not.toHaveBeenCalled();
+    expect(screen.getByText(/上次刷新：/)).toBeInTheDocument();
   });
 
   it('shows decision signal band, review snapshot, and news filters from opportunity overview', async () => {
@@ -267,7 +388,17 @@ describe('StockScreeningPage', () => {
       available: true,
       installSpecIsDefault: true,
     });
-    getOpportunityOverview.mockResolvedValueOnce({
+    getOpportunityScanTask.mockResolvedValueOnce({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+      result: {
       enabled: true,
       marketTemperature: { score: 72, label: 'warm' },
       newsStatus: 'success',
@@ -283,10 +414,12 @@ describe('StockScreeningPage', () => {
       opportunities: [],
       dataQuality: { level: 'partial', warnings: [] },
       warnings: [],
+      },
     });
 
     render(<StockScreeningPage />);
 
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
     expect(await screen.findByText('方向')).toBeInTheDocument();
     expect(screen.getByText('看多')).toBeInTheDocument();
     expect(screen.getByText('已复盘')).toBeInTheDocument();
@@ -300,7 +433,17 @@ describe('StockScreeningPage', () => {
       available: true,
       installSpecIsDefault: true,
     });
-    getOpportunityOverview.mockResolvedValueOnce({
+    getOpportunityScanTask.mockResolvedValueOnce({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+      result: {
       enabled: true,
       marketTemperature: { score: 72, label: 'warm' },
       marketOutlook: {
@@ -313,10 +456,12 @@ describe('StockScreeningPage', () => {
       opportunities: [],
       dataQuality: { level: 'partial', warnings: [] },
       warnings: [],
+      },
     });
 
     render(<StockScreeningPage />);
 
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
     expect(await screen.findByText('Lead sector AI compute with a strong setup.')).toBeInTheDocument();
   });
 
@@ -326,8 +471,18 @@ describe('StockScreeningPage', () => {
       available: true,
       installSpecIsDefault: true,
     });
-    getOpportunityOverview
+    getOpportunityScanTask
       .mockResolvedValueOnce({
+        taskId: 'op-task-1',
+        traceId: 'op-task-1',
+        status: 'completed',
+        progress: 100,
+        message: '机会扫描完成',
+        market: 'cn',
+        scope: 'balanced',
+        riskProfile: 'balanced',
+        maxResults: 6,
+        result: {
         enabled: true,
         marketTemperature: { score: 72, label: 'warm' },
         riskBudget: { riskProfile: 'balanced', singleTradeRiskPct: 1.5 },
@@ -353,8 +508,19 @@ describe('StockScreeningPage', () => {
         ],
         dataQuality: { level: 'partial', warnings: [] },
         warnings: [],
+        },
       })
       .mockResolvedValueOnce({
+        taskId: 'op-task-2',
+        traceId: 'op-task-2',
+        status: 'completed',
+        progress: 100,
+        message: '机会扫描完成',
+        market: 'cn',
+        scope: 'etf',
+        riskProfile: 'aggressive',
+        maxResults: 6,
+        result: {
         enabled: true,
         marketTemperature: { score: 68, label: 'warm' },
         riskBudget: { riskProfile: 'aggressive', singleTradeRiskPct: 2 },
@@ -380,20 +546,25 @@ describe('StockScreeningPage', () => {
         ],
         dataQuality: { level: 'partial', warnings: [] },
         warnings: [],
+        },
       });
 
     render(<StockScreeningPage />);
 
     expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
+    expect(await screen.findByText(/建议仓位 10-20%/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'ETF 优先' }));
     fireEvent.click(screen.getByRole('button', { name: '激进' }));
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
 
     await waitFor(() =>
-      expect(getOpportunityOverview).toHaveBeenLastCalledWith({
+      expect(startOpportunityScan).toHaveBeenLastCalledWith({
         market: 'cn',
         scope: 'etf',
-        limit: 6,
         riskProfile: 'aggressive',
+        watchlistOnly: false,
+        maxResults: 6,
       }),
     );
     expect(await screen.findByText(/单笔风险 <= 2%/)).toBeInTheDocument();
@@ -406,7 +577,17 @@ describe('StockScreeningPage', () => {
       installSpecIsDefault: true,
     });
     watchlistIsInWatchlist.mockImplementation((stockCode: string) => stockCode === '300750');
-    getOpportunityOverview.mockResolvedValueOnce({
+    getOpportunityScanTask.mockResolvedValueOnce({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+      result: {
       enabled: true,
       marketTemperature: { score: 72, label: 'warm' },
       topSectors: [{ name: 'AI算力', score: 88, changePct: 5.2 }],
@@ -436,11 +617,13 @@ describe('StockScreeningPage', () => {
       ],
       dataQuality: { level: 'partial', warnings: [] },
       warnings: [],
+      },
     });
 
     render(<StockScreeningPage />);
 
     expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
     expect(screen.getByRole('button', { name: '从自选移除' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '加入自选' }));
 
