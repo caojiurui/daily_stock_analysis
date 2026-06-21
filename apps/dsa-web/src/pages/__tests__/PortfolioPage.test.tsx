@@ -15,6 +15,7 @@ const {
   listTrades,
   listCashLedger,
   listCorporateActions,
+  getOpportunityOverview,
   createTrade,
   deleteTrade,
   createCashLedger,
@@ -35,6 +36,7 @@ const {
   listTrades: vi.fn(),
   listCashLedger: vi.fn(),
   listCorporateActions: vi.fn(),
+  getOpportunityOverview: vi.fn(),
   createTrade: vi.fn(),
   deleteTrade: vi.fn(),
   createCashLedger: vi.fn(),
@@ -69,6 +71,12 @@ vi.mock('../../api/portfolio', () => ({
     createAccount,
     deleteAccount,
     analyzePosition,
+  },
+}));
+
+vi.mock('../../api/opportunities', () => ({
+  opportunitiesApi: {
+    getOverview: (payload: unknown) => getOpportunityOverview(payload),
   },
 }));
 
@@ -221,11 +229,19 @@ describe('PortfolioPage FX refresh', () => {
       errorCount: 0,
     });
     listImportBrokers.mockResolvedValue({
-      brokers: [{ broker: 'huatai', aliases: [], displayName: '华泰' }],
+      brokers: [{ broker: 'huatai', aliases: [], displayName: '鍗庢嘲' }],
     });
     listTrades.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 });
     listCashLedger.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 });
     listCorporateActions.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 20 });
+    getOpportunityOverview.mockResolvedValue({
+      enabled: false,
+      marketTemperature: { score: 0, label: 'disabled' },
+      topSectors: [],
+      opportunities: [],
+      dataQuality: { level: 'disabled', warnings: ['opportunity_engine_disabled'] },
+      warnings: ['opportunity_engine_disabled'],
+    });
     createTrade.mockResolvedValue({ id: 1 });
     deleteTrade.mockResolvedValue({ deleted: 1 });
     createCashLedger.mockResolvedValue({ id: 1 });
@@ -248,7 +264,7 @@ describe('PortfolioPage FX refresh', () => {
       taskId: 'task-portfolio-1',
       traceId: 'task-portfolio-1',
       status: 'pending',
-      message: '分析任务已加入队列: HK00700',
+      message: '鍒嗘瀽浠诲姟宸插姞鍏ラ槦鍒? HK00700',
       analysisPhase: 'auto',
     });
   });
@@ -267,8 +283,8 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    expect(await screen.findByText('过期')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '刷新汇率' })).toBeInTheDocument();
+    expect(await screen.findByText('杩囨湡')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '鍒锋柊姹囩巼' })).toBeInTheDocument();
   });
 
   it('renders portfolio risk drawdown labels in English UI mode', async () => {
@@ -282,7 +298,139 @@ describe('PortfolioPage FX refresh', () => {
     expect(screen.getByText(/Current drawdown:/)).toBeInTheDocument();
     expect(screen.getByText('Stop-loss proximity warning')).toBeInTheDocument();
     expect(screen.getByText('Scope')).toBeInTheDocument();
-    expect(screen.queryByText('回撤监控')).not.toBeInTheDocument();
+    expect(screen.queryByText('鍥炴挙鐩戞帶')).not.toBeInTheDocument();
+  });
+
+  it('shows holding-linked opportunities for the current portfolio view', async () => {
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 71, label: 'warm' },
+      topSectors: [],
+      opportunities: [
+        {
+          code: '300750',
+          name: '瀹佸痉鏃朵唬',
+          instrumentType: 'stock',
+          score: 83,
+          reason: 'Holding-linked momentum remains active in the current theme.',
+          sector: '鐢垫睜',
+          riskBudget: { instrumentType: 'stock', positionMinPct: 10, positionMaxPct: 20 },
+          chipStatus: { status: 'unavailable' },
+          dataQuality: 'partial',
+          holdingMatch: true,
+          tags: ['鎸佷粨鐩稿叧'],
+        },
+      ],
+      keyNews: [],
+      portfolioContext: { holdingCount: 1, watchlistCount: 0 },
+      dataQuality: { level: 'good', warnings: [] },
+      warnings: [],
+    });
+
+    renderEnglishPage();
+
+    expect(await screen.findByText('Holding-linked opportunities')).toBeInTheDocument();
+    expect(screen.getByText('瀹佸痉鏃朵唬')).toBeInTheDocument();
+    expect(getOpportunityOverview).toHaveBeenCalledWith({ market: 'us', scope: 'balanced', limit: 6, accountId: 1 });
+  });
+
+  it('shows shared market outlook and review snapshot for holding-linked opportunities', async () => {
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 71, label: 'warm' },
+      marketOutlook: { predictedDirection: '看多', predictedBias: 'bullish', confidencePct: 66 },
+      reviewSnapshot: { status: 'reviewed', label: '已复盘', successPct: 58, focusTotal: 12 },
+      evidenceSummary: {
+        comparisonHighlights: [{ label: '主线', value: 'AI算力', tone: 'bullish' }],
+      },
+      topSectors: [],
+      opportunities: [],
+      keyNews: [],
+      portfolioContext: { holdingCount: 1, watchlistCount: 0 },
+      dataQuality: { level: 'good', warnings: [] },
+      warnings: [],
+    });
+
+    renderEnglishPage();
+
+    expect(await screen.findByText('看多')).toBeInTheDocument();
+    expect(screen.getByText('已复盘')).toBeInTheDocument();
+    expect(screen.getByText(/58/)).toBeInTheDocument();
+  });
+
+  it('shows market outlook reasoning for holding-linked opportunities', async () => {
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 71, label: 'warm' },
+      marketOutlook: {
+        predictedDirection: '看多',
+        predictedBias: 'bullish',
+        confidencePct: 66,
+        reasoning: 'Lead sector AI compute remains in focus.',
+      },
+      topSectors: [],
+      opportunities: [],
+      keyNews: [],
+      portfolioContext: { holdingCount: 1, watchlistCount: 0 },
+      dataQuality: { level: 'good', warnings: [] },
+      warnings: [],
+    });
+
+    renderEnglishPage();
+
+    expect(await screen.findByText('Lead sector AI compute remains in focus.')).toBeInTheDocument();
+  });
+
+  it('shows sector risk and opportunity hints when holding-linked ideas overlap concentrated sectors', async () => {
+    getRisk.mockResolvedValueOnce({
+      ...makeRisk(),
+      sectorConcentration: {
+        totalMarketValue: 100000,
+        topWeightPct: 42.5,
+        alert: true,
+        topSectors: [
+          {
+            sector: 'Battery',
+            marketValueBase: 42500,
+            weightPct: 42.5,
+            symbolCount: 2,
+            isAlert: true,
+          },
+        ],
+        coverage: {},
+        errors: [],
+      },
+    });
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 71, label: 'warm' },
+      topSectors: [],
+      opportunities: [
+        {
+          code: 'TSLA',
+          name: 'Tesla',
+          instrumentType: 'stock',
+          score: 81,
+          reason: 'Battery demand remains active.',
+          sector: 'Battery',
+          riskBudget: { instrumentType: 'stock', positionMinPct: 10, positionMaxPct: 20 },
+          chipStatus: { status: 'unavailable' },
+          dataQuality: 'partial',
+          holdingMatch: true,
+          tags: ['holding-linked'],
+        },
+      ],
+      keyNews: [],
+      portfolioContext: { holdingCount: 1, watchlistCount: 0 },
+      dataQuality: { level: 'good', warnings: [] },
+      warnings: [],
+    });
+
+    renderEnglishPage();
+
+    expect(await screen.findByText('Sector risk & opportunity')).toBeInTheDocument();
+    expect(screen.getByText('Battery')).toBeInTheDocument();
+    expect(screen.getByText('42.50%')).toBeInTheDocument();
   });
 
   it('refreshes FX for a single selected account and only reloads snapshot/risk', async () => {
@@ -306,16 +454,16 @@ describe('PortfolioPage FX refresh', () => {
     const riskCallsBeforeRefresh = getRisk.mock.calls.length;
     const tradeCallsBeforeRefresh = listTrades.mock.calls.length;
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
     await waitFor(() => expect(refreshFx).toHaveBeenCalledWith({ accountId: 1 }));
-    expect(await screen.findByText('汇率已刷新，共更新 1 对。')).toBeInTheDocument();
+    expect(await screen.findByText('姹囩巼宸插埛鏂帮紝鍏辨洿鏂?1 瀵广€?')).toBeInTheDocument();
     await waitFor(() => expect(getSnapshot).toHaveBeenCalledTimes(snapshotCallsBeforeRefresh + 1));
     await waitFor(() => expect(getRisk).toHaveBeenCalledTimes(riskCallsBeforeRefresh + 1));
     expect(listTrades).toHaveBeenCalledTimes(tradeCallsBeforeRefresh);
     expect(listCashLedger).not.toHaveBeenCalled();
     expect(listCorporateActions).not.toHaveBeenCalled();
-    expect(screen.getByText('最新')).toBeInTheDocument();
+    expect(screen.getByText('鏈€鏂?')).toBeInTheDocument();
   });
 
   it('refreshes FX for the full portfolio without sending accountId and shows neutral feedback when no pair exists', async () => {
@@ -334,10 +482,10 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
     await waitFor(() => expect(refreshFx).toHaveBeenCalledWith({ accountId: undefined }));
-    expect(await screen.findByText('当前范围无可刷新的汇率对。')).toBeInTheDocument();
+    expect(await screen.findByText('褰撳墠鑼冨洿鏃犲彲鍒锋柊鐨勬眹鐜囧銆?')).toBeInTheDocument();
   });
 
   it('shows disabled feedback when FX online refresh is disabled even without a disabled reason', async () => {
@@ -355,9 +503,9 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
-    expect(await screen.findByText('汇率在线刷新已被禁用。')).toBeInTheDocument();
+    expect(await screen.findByText('姹囩巼鍦ㄧ嚎鍒锋柊宸茶绂佺敤銆?')).toBeInTheDocument();
   });
 
   it('renders backend-provided position valuation fields and stale missing-price hint', async () => {
@@ -374,8 +522,8 @@ describe('PortfolioPage FX refresh', () => {
     expect(screen.getByText('420.0000')).toBeInTheDocument();
     expect(screen.getByText('HKD 4,200.00')).toBeInTheDocument();
     expect(screen.getByText('+5.00%')).toBeInTheDocument();
-    expect(screen.getByText('收盘价 · 2026-03-18')).toBeInTheDocument();
-    expect(screen.getByText('缺价')).toBeInTheDocument();
+    expect(screen.getByText('鏀剁洏浠?路 2026-03-18')).toBeInTheDocument();
+    expect(screen.getByText('缂轰环')).toBeInTheDocument();
     expect(screen.getAllByText('--').length).toBeGreaterThanOrEqual(2);
 
     const hkRow = screen.getByText('HK00700').closest('tr');
@@ -400,7 +548,7 @@ describe('PortfolioPage FX refresh', () => {
 
     const row = screen.getByText('HK00700').closest('tr');
     expect(row).not.toBeNull();
-    fireEvent.click(within(row as HTMLTableRowElement).getByRole('button', { name: '分析' }));
+    fireEvent.click(within(row as HTMLTableRowElement).getByRole('button', { name: '鍒嗘瀽' }));
 
     await waitFor(() => {
       expect(analyzePosition).toHaveBeenCalledWith('HK00700', {
@@ -409,7 +557,7 @@ describe('PortfolioPage FX refresh', () => {
         force: false,
       });
     });
-    expect(await screen.findByText('已提交 HK00700 分析任务：task-portfolio-1')).toBeInTheDocument();
+    expect(await screen.findByText('宸叉彁浜?HK00700 鍒嗘瀽浠诲姟锛歵ask-portfolio-1')).toBeInTheDocument();
   });
 
   it('prefers disabled feedback over empty-pair feedback when refresh is disabled', async () => {
@@ -428,10 +576,10 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
-    expect(await screen.findByText('汇率在线刷新已被禁用。')).toBeInTheDocument();
-    expect(screen.queryByText('当前范围无可刷新的汇率对。')).not.toBeInTheDocument();
+    expect(await screen.findByText('姹囩巼鍦ㄧ嚎鍒锋柊宸茶绂佺敤銆?')).toBeInTheDocument();
+    expect(screen.queryByText('褰撳墠鑼冨洿鏃犲彲鍒锋柊鐨勬眹鐜囧銆?')).not.toBeInTheDocument();
   });
 
   it('shows warning feedback when FX refresh still falls back to stale rates', async () => {
@@ -448,9 +596,9 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
-    expect(await screen.findByText(/stale\/fallback 汇率/)).toBeInTheDocument();
+    expect(await screen.findByText(/stale\/fallback 姹囩巼/)).toBeInTheDocument();
   });
 
   it('shows warning feedback when FX refresh returns online errors without stale pairs', async () => {
@@ -471,9 +619,9 @@ describe('PortfolioPage FX refresh', () => {
     const riskCallsBeforeRefresh = getRisk.mock.calls.length;
     const tradeCallsBeforeRefresh = listTrades.mock.calls.length;
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
-    expect(await screen.findByText(/在线刷新未完全成功/)).toBeInTheDocument();
+    expect(await screen.findByText('鍦ㄧ嚎鍒锋柊鏈畬鍏ㄦ垚鍔?')).toBeInTheDocument();
     await waitFor(() => expect(getSnapshot).toHaveBeenCalledTimes(snapshotCallsBeforeRefresh + 1));
     await waitFor(() => expect(getRisk).toHaveBeenCalledTimes(riskCallsBeforeRefresh + 1));
     expect(listTrades).toHaveBeenCalledTimes(tradeCallsBeforeRefresh);
@@ -485,8 +633,8 @@ describe('PortfolioPage FX refresh', () => {
     refreshFx.mockRejectedValueOnce(
       createApiError(
         createParsedApiError({
-          title: '刷新失败',
-          message: '汇率服务暂时不可用',
+          title: '鍒锋柊澶辫触',
+          message: '姹囩巼鏈嶅姟鏆傛椂涓嶅彲鐢?',
         }),
       ),
     );
@@ -495,12 +643,12 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    const refreshButton = screen.getByRole('button', { name: '刷新汇率' });
+    const refreshButton = screen.getByRole('button', { name: '鍒锋柊姹囩巼' });
     fireEvent.click(refreshButton);
 
-    const fxAlertTitle = await screen.findByText('刷新失败');
-    expect(fxAlertTitle.closest('[role="alert"]')).toHaveTextContent('汇率服务暂时不可用');
-    await waitFor(() => expect(screen.getByRole('button', { name: '刷新汇率' })).not.toBeDisabled());
+    const fxAlertTitle = await screen.findByText('鍒锋柊澶辫触');
+    expect(fxAlertTitle.closest('[role="alert"]')).toHaveTextContent('姹囩巼鏈嶅姟鏆傛椂涓嶅彲鐢?');
+    await waitFor(() => expect(screen.getByRole('button', { name: '鍒锋柊姹囩巼' })).not.toBeDisabled());
   });
 
   it('does not keep success feedback when snapshot reload fails after FX refresh succeeds', async () => {
@@ -509,8 +657,8 @@ describe('PortfolioPage FX refresh', () => {
       .mockRejectedValueOnce(
         createApiError(
           createParsedApiError({
-            title: '快照刷新失败',
-            message: '无法加载最新持仓快照',
+            title: '蹇収鍒锋柊澶辫触',
+            message: '鏃犳硶鍔犺浇鏈€鏂版寔浠撳揩鐓?',
           }),
         ),
       );
@@ -519,12 +667,12 @@ describe('PortfolioPage FX refresh', () => {
 
     await waitForInitialLoad();
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
 
-    const fxAlertTitle = await screen.findByText('快照刷新失败');
-    expect(fxAlertTitle.closest('[role="alert"]')).toHaveTextContent('无法加载最新持仓快照');
-    await waitFor(() => expect(screen.queryByText('汇率已刷新，共更新 1 对。')).not.toBeInTheDocument());
-    await waitFor(() => expect(screen.getByRole('button', { name: '刷新汇率' })).not.toBeDisabled());
+    const fxAlertTitle = await screen.findByText('蹇収鍒锋柊澶辫触');
+    expect(fxAlertTitle.closest('[role="alert"]')).toHaveTextContent('鏃犳硶鍔犺浇鏈€鏂版寔浠撳揩鐓?');
+    await waitFor(() => expect(screen.queryByText('姹囩巼宸插埛鏂帮紝鍏辨洿鏂?1 瀵广€?')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: '鍒锋柊姹囩巼' })).not.toBeDisabled());
   });
 
   it('drops late FX refresh results after switching to another account scope', async () => {
@@ -554,12 +702,12 @@ describe('PortfolioPage FX refresh', () => {
     fireEvent.change(accountSelect, { target: { value: '1' } });
     await waitFor(() => expect(getSnapshot).toHaveBeenLastCalledWith({ accountId: 1, costMethod: 'fifo' }));
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
-    expect(await screen.findByRole('button', { name: '刷新中...' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
+    expect(await screen.findByRole('button', { name: '鍒锋柊涓?..' })).toBeDisabled();
 
     fireEvent.change(accountSelect, { target: { value: '2' } });
     await waitFor(() => expect(getSnapshot).toHaveBeenLastCalledWith({ accountId: 2, costMethod: 'fifo' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: '刷新汇率' })).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: '鍒锋柊姹囩巼' })).not.toBeDisabled());
 
     const snapshotCallsAfterSwitch = getSnapshot.mock.calls.length;
     const riskCallsAfterSwitch = getRisk.mock.calls.length;
@@ -578,7 +726,7 @@ describe('PortfolioPage FX refresh', () => {
 
     expect(getSnapshot).toHaveBeenCalledTimes(snapshotCallsAfterSwitch);
     expect(getRisk).toHaveBeenCalledTimes(riskCallsAfterSwitch);
-    expect(screen.queryByText('汇率已刷新，共更新 1 对。')).not.toBeInTheDocument();
+    expect(screen.queryByText('姹囩巼宸插埛鏂帮紝鍏辨洿鏂?1 瀵广€?')).not.toBeInTheDocument();
   });
 
   it('drops late FX refresh results after switching cost method', async () => {
@@ -598,12 +746,12 @@ describe('PortfolioPage FX refresh', () => {
 
     const costMethodSelect = screen.getAllByRole('combobox')[1];
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新汇率' }));
-    expect(await screen.findByRole('button', { name: '刷新中...' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '鍒锋柊姹囩巼' }));
+    expect(await screen.findByRole('button', { name: '鍒锋柊涓?..' })).toBeDisabled();
 
     fireEvent.change(costMethodSelect, { target: { value: 'avg' } });
     await waitFor(() => expect(getSnapshot).toHaveBeenLastCalledWith({ accountId: undefined, costMethod: 'avg' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: '刷新汇率' })).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: '鍒锋柊姹囩巼' })).not.toBeDisabled());
 
     const snapshotCallsAfterSwitch = getSnapshot.mock.calls.length;
     const riskCallsAfterSwitch = getRisk.mock.calls.length;
@@ -622,7 +770,7 @@ describe('PortfolioPage FX refresh', () => {
 
     expect(getSnapshot).toHaveBeenCalledTimes(snapshotCallsAfterSwitch);
     expect(getRisk).toHaveBeenCalledTimes(riskCallsAfterSwitch);
-    expect(screen.queryByText('汇率已刷新，共更新 1 对。')).not.toBeInTheDocument();
+    expect(screen.queryByText('姹囩巼宸插埛鏂帮紝鍏辨洿鏂?1 瀵广€?')).not.toBeInTheDocument();
   });
 
   it('deactivates the selected account from the account toolbar and reloads accounts', async () => {
@@ -638,13 +786,13 @@ describe('PortfolioPage FX refresh', () => {
     fireEvent.change(accountSelect, { target: { value: '1' } });
 
     await waitFor(() => expect(getSnapshot).toHaveBeenLastCalledWith({ accountId: 1, costMethod: 'fifo' }));
-    fireEvent.click(screen.getByRole('button', { name: '删除账户' }));
+    fireEvent.click(screen.getByRole('button', { name: '鍒犻櫎璐︽埛' }));
 
-    const dialog = await screen.findByText('删除持仓账户');
+    const dialog = await screen.findByText('鍒犻櫎鎸佷粨璐︽埛');
     expect(dialog.closest('[role="dialog"]') ?? document.body).toHaveTextContent(
-      '删除后该账户会从默认列表、快照、风险和录入入口隐藏',
+      '鍒犻櫎鍚庤璐︽埛浼氫粠榛樿鍒楄〃銆佸揩鐓с€侀闄╁拰褰曞叆鍏ュ彛闅愯棌',
     );
-    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '纭鍒犻櫎' }));
 
     await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith(1));
     await waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(2));

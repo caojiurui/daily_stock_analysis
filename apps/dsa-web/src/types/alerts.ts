@@ -14,7 +14,10 @@ export type AlertType =
   | 'portfolio_drawdown'
   | 'portfolio_price_stale'
   | 'market_light_status'
-  | 'market_light_score_drop';
+  | 'market_light_score_drop'
+  | 'sector_move'
+  | 'news_catalyst'
+  | 'opportunity_score_cross';
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 export type AlertTargetScope = 'single_symbol' | 'watchlist' | 'portfolio_holdings' | 'portfolio_account' | 'market';
 export type AlertDirection = 'above' | 'below' | 'up' | 'down' | 'bullish_cross' | 'bearish_cross';
@@ -40,6 +43,9 @@ export interface AlertRuleParameters {
   mode?: PortfolioStopLossMode;
   statuses?: MarketLightStatus[];
   minDrop?: number;
+  minScore?: number;
+  minChangePct?: number;
+  keywords?: string[];
 }
 
 export interface AlertRuleItem {

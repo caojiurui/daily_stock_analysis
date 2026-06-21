@@ -1,7 +1,9 @@
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pie, PieChart, ResponsiveContainer, Tooltip, Legend, Cell } from 'recharts';
+import { opportunitiesApi } from '../api/opportunities';
 import { portfolioApi } from '../api/portfolio';
+import type { OpportunityOverview } from '../api/opportunities';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert } from '../components/common';
@@ -46,6 +48,7 @@ import type {
 
 const PIE_COLORS = ['#00d4ff', '#00ff88', '#ffaa00', '#ff7a45', '#7f8cff', '#ff4466'];
 const DEFAULT_PAGE_SIZE = 20;
+const HOLDING_OPPORTUNITY_LIMIT = 6;
 const FALLBACK_BROKERS: PortfolioImportBrokerItem[] = [
   { broker: 'huatai', aliases: [], displayName: '华泰' },
   { broker: 'citic', aliases: ['zhongxin'], displayName: '中信' },
@@ -81,9 +84,53 @@ const PORTFOLIO_SELECT_CLASS = `${PORTFOLIO_INPUT_CLASS} appearance-none pr-10`;
 const PORTFOLIO_FILE_PICKER_CLASS =
   'input-surface input-focus-glow flex h-11 w-full cursor-pointer items-center justify-center rounded-xl border bg-transparent px-4 text-sm transition-all focus:outline-none disabled:cursor-not-allowed disabled:opacity-60';
 
+function normalizePortfolioMatchKey(value: string | undefined | null): string {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
+}
+
 const PortfolioPage: React.FC = () => {
   const { language } = useUiLanguage();
   const text = PORTFOLIO_TEXT[language];
+  const holdingOpportunityText = language === 'zh'
+    ? {
+      title: '持仓关联机会',
+      description: '按当前持仓范围反查机会结果，优先提示与你已有仓位直接相关的标的。',
+      loading: '正在加载关联机会...',
+      unavailable: '关联机会暂不可用',
+      empty: '当前持仓暂无明确的关联机会信号。',
+      score: '机会分',
+      linkedEtf: '关联 ETF',
+      relatedHolding: '持仓相关',
+      count: '{count} 项关联结果',
+    }
+    : {
+      title: 'Holding-linked opportunities',
+      description: 'Reverse-check the current opportunity snapshot and surface ideas directly linked to the holdings in view.',
+      loading: 'Loading holding-linked opportunities...',
+      unavailable: 'Holding-linked opportunities are temporarily unavailable',
+      empty: 'No holding-linked opportunity signals are available for the current scope.',
+      score: 'Score',
+      linkedEtf: 'Linked ETF',
+      relatedHolding: 'Holding-linked',
+      count: '{count} linked ideas',
+    };
+  const sectorHintText = language === 'zh'
+    ? {
+      title: '关联板块风险与机会',
+      description: '把持仓相关机会与当前板块集中度放在一起，帮助判断是继续跟踪还是先控仓。',
+      weight: '集中度',
+      linkedIdeas: '关联机会',
+      alert: '集中度告警',
+      active: '机会仍活跃',
+    }
+    : {
+      title: 'Sector risk & opportunity',
+      description: 'Pair holding-linked ideas with current sector concentration so you can balance follow-up and position control.',
+      weight: 'Concentration',
+      linkedIdeas: 'Linked ideas',
+      alert: 'Concentration alert',
+      active: 'Opportunity active',
+    };
 
   // Set page title
   useEffect(() => {
@@ -113,6 +160,9 @@ const PortfolioPage: React.FC = () => {
   const [writeWarning, setWriteWarning] = useState<string | null>(null);
   const [positionAnalysisLoadingKey, setPositionAnalysisLoadingKey] = useState<string | null>(null);
   const [positionAnalysisMessage, setPositionAnalysisMessage] = useState<string | null>(null);
+  const [holdingOpportunityOverview, setHoldingOpportunityOverview] = useState<OpportunityOverview | null>(null);
+  const [holdingOpportunityLoading, setHoldingOpportunityLoading] = useState(false);
+  const [holdingOpportunityError, setHoldingOpportunityError] = useState<string | null>(null);
 
   const [brokers, setBrokers] = useState<PortfolioImportBrokerItem[]>([]);
   const [selectedBroker, setSelectedBroker] = useState('huatai');
@@ -420,6 +470,157 @@ const PortfolioPage: React.FC = () => {
 
   const concentrationPieData = sectorPieData.length > 0 ? sectorPieData : positionFallbackPieData;
   const concentrationMode = sectorPieData.length > 0 ? 'sector' : 'position';
+  const holdingOpportunityQuery = useMemo(() => {
+    if (accounts.length === 0) {
+      return null;
+    }
+    if (selectedAccount !== 'all') {
+      const account = accounts.find((item) => item.id === selectedAccount);
+      if (!account) {
+        return null;
+      }
+      return {
+        market: account.market || 'all',
+        scope: 'balanced' as const,
+        limit: HOLDING_OPPORTUNITY_LIMIT,
+        accountId: account.id,
+      };
+    }
+    if (accounts.length === 1) {
+      const account = accounts[0];
+      return {
+        market: account.market || 'all',
+        scope: 'balanced' as const,
+        limit: HOLDING_OPPORTUNITY_LIMIT,
+        accountId: account.id,
+      };
+    }
+    return {
+      market: 'all',
+      scope: 'balanced' as const,
+      limit: HOLDING_OPPORTUNITY_LIMIT,
+    };
+  }, [accounts, selectedAccount]);
+  const holdingLinkedOpportunities = useMemo(() => {
+    return (holdingOpportunityOverview?.opportunities || []).filter((item) => item.holdingMatch);
+  }, [holdingOpportunityOverview]);
+  const holdingLinkedSectorHints = useMemo(() => {
+    const topSectors = risk?.sectorConcentration?.topSectors || [];
+    if (holdingLinkedOpportunities.length === 0 || topSectors.length === 0) {
+      return [];
+    }
+
+    const grouped = new Map<string, {
+      sector: string;
+      opportunityNames: string[];
+      opportunityCount: number;
+    }>();
+
+    for (const item of holdingLinkedOpportunities) {
+      const sectorName = String(item.sector || '').trim();
+      const matchKey = normalizePortfolioMatchKey(sectorName);
+      if (!matchKey) {
+        continue;
+      }
+      const existing = grouped.get(matchKey);
+      if (existing) {
+        existing.opportunityCount += 1;
+        if (item.name && !existing.opportunityNames.includes(item.name)) {
+          existing.opportunityNames.push(item.name);
+        }
+        continue;
+      }
+      grouped.set(matchKey, {
+        sector: sectorName,
+        opportunityNames: item.name ? [item.name] : [],
+        opportunityCount: 1,
+      });
+    }
+
+    return topSectors
+      .map((sectorItem) => {
+        const sectorName = String(sectorItem.sector || '').trim();
+        const sectorKey = normalizePortfolioMatchKey(sectorName);
+        if (!sectorKey) {
+          return null;
+        }
+
+        let matched = grouped.get(sectorKey) || null;
+        if (!matched) {
+          matched = Array.from(grouped.entries())
+            .find(([key]) => key.includes(sectorKey) || sectorKey.includes(key))?.[1] || null;
+        }
+        if (!matched) {
+          return null;
+        }
+
+        return {
+          sector: sectorName || matched.sector,
+          weightPct: Number(sectorItem.weightPct || 0),
+          isAlert: Boolean(sectorItem.isAlert),
+          opportunityCount: matched.opportunityCount,
+          opportunityNames: matched.opportunityNames.slice(0, 2),
+        };
+      })
+      .filter((item): item is {
+        sector: string;
+        weightPct: number;
+        isAlert: boolean;
+        opportunityCount: number;
+        opportunityNames: string[];
+      } => Boolean(item))
+      .sort((a, b) => {
+        if (a.isAlert !== b.isAlert) {
+          return a.isAlert ? -1 : 1;
+        }
+        return b.weightPct - a.weightPct;
+      });
+  }, [holdingLinkedOpportunities, risk]);
+  const shouldShowHoldingOpportunitySection = hasAccounts && (
+    holdingOpportunityLoading
+    || Boolean(holdingOpportunityError)
+    || holdingLinkedOpportunities.length > 0
+    || Boolean(holdingOpportunityOverview?.portfolioContext?.holdingCount)
+  );
+
+  useEffect(() => {
+    if (!holdingOpportunityQuery) {
+      setHoldingOpportunityOverview(null);
+      setHoldingOpportunityError(null);
+      setHoldingOpportunityLoading(false);
+      return;
+    }
+
+    let active = true;
+    setHoldingOpportunityLoading(true);
+    setHoldingOpportunityOverview(null);
+    setHoldingOpportunityError(null);
+
+    void opportunitiesApi.getOverview(holdingOpportunityQuery)
+      .then((overview) => {
+        if (!active) {
+          return;
+        }
+        setHoldingOpportunityOverview(overview);
+      })
+      .catch((err) => {
+        if (!active) {
+          return;
+        }
+        const parsed = getParsedApiError(err);
+        setHoldingOpportunityOverview(null);
+        setHoldingOpportunityError(parsed.message || holdingOpportunityText.unavailable);
+      })
+      .finally(() => {
+        if (active) {
+          setHoldingOpportunityLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [holdingOpportunityQuery, holdingOpportunityText.unavailable]);
 
   const handleTradeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -948,6 +1149,147 @@ const PortfolioPage: React.FC = () => {
           ) : null}
         </Card>
       </section>
+
+      {shouldShowHoldingOpportunitySection ? (
+        <section className="grid grid-cols-1 gap-3">
+          <Card padding="md">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold text-foreground">{holdingOpportunityText.title}</h2>
+                <p className="mt-1 text-xs text-secondary">{holdingOpportunityText.description}</p>
+              </div>
+              {holdingLinkedOpportunities.length > 0 ? (
+                <Badge variant="info" className="shadow-none">
+                  {formatUiText(holdingOpportunityText.count, { count: holdingLinkedOpportunities.length })}
+                </Badge>
+              ) : null}
+            </div>
+            {!holdingOpportunityLoading && !holdingOpportunityError && (
+              holdingOpportunityOverview?.marketOutlook
+              || holdingOpportunityOverview?.reviewSnapshot
+              || holdingOpportunityOverview?.evidenceSummary?.comparisonHighlights?.length
+            ) ? (
+              <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-[220px_minmax(0,1fr)]">
+                <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                  <div className="text-[11px] text-secondary">Market outlook</div>
+                  <div className="mt-1 text-sm font-semibold text-foreground">
+                    {holdingOpportunityOverview?.marketOutlook?.predictedDirection || '观望'}
+                  </div>
+                  <div className="mt-2 text-[11px] text-secondary">
+                    {holdingOpportunityOverview?.reviewSnapshot?.label || '待复盘'} · 成功率 {Number(holdingOpportunityOverview?.reviewSnapshot?.successPct || 0).toFixed(1)}%
+                  </div>
+                  {holdingOpportunityOverview?.marketOutlook?.reasoning ? (
+                    <div className="mt-2 text-[11px] leading-5 text-secondary">
+                      {holdingOpportunityOverview.marketOutlook.reasoning}
+                    </div>
+                  ) : null}
+                  <div className="mt-1 text-[11px] text-secondary">
+                    Focus {holdingOpportunityOverview?.reviewSnapshot?.focusTotal ?? 0}
+                  </div>
+                </div>
+                {holdingOpportunityOverview?.evidenceSummary?.comparisonHighlights?.length ? (
+                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+                    {holdingOpportunityOverview.evidenceSummary.comparisonHighlights.map((item, index) => (
+                      <div
+                        key={`${item.label}-${index}`}
+                        className="rounded-lg border border-white/10 bg-white/[0.02] p-3"
+                      >
+                        <div className="text-[11px] text-secondary">{item.label}</div>
+                        <div className="mt-1 text-sm font-medium text-foreground">{item.value}</div>
+                        {item.detail ? <div className="mt-1 text-[11px] text-secondary">{item.detail}</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {holdingOpportunityLoading ? (
+              <p className="mt-3 text-xs text-secondary">{holdingOpportunityText.loading}</p>
+            ) : null}
+            {!holdingOpportunityLoading && holdingOpportunityError ? (
+              <InlineAlert
+                variant="warning"
+                title={holdingOpportunityText.unavailable}
+                message={holdingOpportunityError}
+                className="mt-3 rounded-lg px-3 py-2 text-xs shadow-none"
+              />
+            ) : null}
+            {!holdingOpportunityLoading && !holdingOpportunityError && holdingLinkedOpportunities.length === 0 ? (
+              <p className="mt-3 text-xs text-secondary">{holdingOpportunityText.empty}</p>
+            ) : null}
+            {!holdingOpportunityLoading && !holdingOpportunityError && holdingLinkedOpportunities.length > 0 ? (
+              <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3">
+                {holdingLinkedOpportunities.map((item) => (
+                  <div
+                    key={`${item.instrumentType}-${item.code}`}
+                    className="rounded-lg border border-white/10 bg-white/[0.02] p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">{item.name}</div>
+                        <div className="mt-1 text-[11px] text-secondary">
+                          {[item.code, item.sector].filter(Boolean).join(' · ')}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <div className="text-[11px] text-secondary">{holdingOpportunityText.score}</div>
+                        <div className="text-sm font-semibold text-foreground">{Math.round(Number(item.score || 0))}</div>
+                      </div>
+                    </div>
+                    {item.reason ? (
+                      <p className="mt-2 text-xs leading-5 text-secondary">{item.reason}</p>
+                    ) : null}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Badge variant="success" className="shadow-none">{holdingOpportunityText.relatedHolding}</Badge>
+                      {item.linkedEtfCode ? (
+                        <Badge variant="info" className="shadow-none">
+                          {`${holdingOpportunityText.linkedEtf} ${item.linkedEtfCode}`}
+                        </Badge>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {!holdingOpportunityLoading && !holdingOpportunityError && holdingLinkedSectorHints.length > 0 ? (
+              <div className="mt-4 border-t border-white/10 pt-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground">{sectorHintText.title}</h3>
+                    <p className="mt-1 text-xs text-secondary">{sectorHintText.description}</p>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3">
+                  {holdingLinkedSectorHints.map((item) => (
+                    <div
+                      key={item.sector}
+                      className="rounded-lg border border-white/10 bg-white/[0.02] p-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-foreground">{item.sector}</div>
+                          <div className="mt-1 text-[11px] text-secondary">
+                            {`${sectorHintText.weight} ${formatPct(item.weightPct)} · ${item.opportunityCount} ${sectorHintText.linkedIdeas.toLowerCase()}`}
+                          </div>
+                        </div>
+                        <Badge
+                          variant={item.isAlert ? 'warning' : 'info'}
+                          className="shadow-none"
+                        >
+                          {item.isAlert ? sectorHintText.alert : sectorHintText.active}
+                        </Badge>
+                      </div>
+                      {item.opportunityNames.length > 0 ? (
+                        <p className="mt-2 text-xs text-secondary">{item.opportunityNames.join(', ')}</p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </Card>
+        </section>
+      ) : null}
 
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-3">
         <Card className="xl:col-span-2" padding="md">

@@ -2838,6 +2838,43 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertIsNone(payload["candidates"][0]["raw"]["nested"]["pe"])
         self.assertIsNone(payload["candidates"][0]["raw"]["nested"]["pb"])
 
+    def test_screen_persists_history_and_allows_detail_lookup(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(
+                return_value={
+                    "run_id": "run-history-1",
+                    "strategy": "dual_low",
+                    "market": "cn",
+                    "snapshot_count": 100,
+                    "candidates": [
+                        {
+                            "code": "600519",
+                            "name": "贵州茅台",
+                            "score": 91.2,
+                            "ranking_reason": "history pick",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch.dict(os.environ, {"ALPHASIFT_DATA_DIR": str(Path(tmpdir) / "alphasift")}, clear=False),
+                patch("src.services.alphasift_service._import_alphasift", return_value=fake_module),
+            ):
+                payload = self._screen(config, market="cn", strategy="dual_low", max_results=5)
+                history = alphasift_endpoint.alphasift_screen_history(limit=10, config=config)
+                history_id = history["history"][0]["id"]
+                detail = alphasift_endpoint.alphasift_screen_history_detail(history_id=history_id, config=config)
+
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(history["history_count"], 1)
+        self.assertEqual(history["history"][0]["run_id"], "run-history-1")
+        self.assertEqual(history["history"][0]["candidates_summary"][0]["code"], "600519")
+        self.assertEqual(detail["result"]["candidates"][0]["name"], "贵州茅台")
+
     def test_screen_allows_non_listed_strategy_as_custom(self) -> None:
         config = self._config(enabled=True)
         fake_module = _make_adapter_module(

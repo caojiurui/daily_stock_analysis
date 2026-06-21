@@ -39,9 +39,17 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
+def warn(message: str) -> None:
+    print(f"[ai-assets] WARN: {message}", file=sys.stderr)
+
+
 def ensure_file_exists(path: Path, description: str) -> None:
     if not path.exists():
         fail(f"{description} is missing: {path.relative_to(ROOT)}")
+
+
+def normalize_resolved_path(path: Path) -> str:
+    return str(path).replace("\\\\?\\", "")
 
 
 def ensure_symlink() -> None:
@@ -52,7 +60,8 @@ def ensure_symlink() -> None:
         fail("CLAUDE.md must be a symlink to AGENTS.md")
 
     target = Path(CLAUDE.readlink())
-    if target != Path("AGENTS.md"):
+    resolved_target = (target if target.is_absolute() else (CLAUDE.parent / target)).resolve()
+    if normalize_resolved_path(resolved_target) != normalize_resolved_path(AGENTS.resolve()):
         fail(f"CLAUDE.md must point to AGENTS.md, found: {target}")
 
 
@@ -98,13 +107,17 @@ def ensure_gitignore_rules() -> None:
 
 
 def ensure_no_tracked_claude_artifacts() -> None:
-    result = subprocess.run(
-        ["git", "ls-files", "--", ".claude"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--", ".claude"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        warn(f"skip tracked .claude artifact check because git is unavailable locally: {type(exc).__name__}")
+        return
     tracked = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     allowed_prefixes = (".claude/skills/",)
     for path in tracked:

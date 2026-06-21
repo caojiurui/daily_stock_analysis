@@ -93,6 +93,31 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_opportunity_engine_defaults_disabled_and_can_be_enabled(
+        self, _mock_parse_litellm_yaml, _mock_setup_env
+    ):
+        with patch.dict(os.environ, {"STOCK_LIST": "600519"}, clear=True):
+            config = Config._load_from_env()
+        self.assertFalse(config.opportunity_engine_enabled)
+
+        with patch.dict(
+            os.environ,
+            {"STOCK_LIST": "600519", "OPPORTUNITY_ENGINE_ENABLED": "true"},
+            clear=True,
+        ):
+            config = Config._load_from_env()
+        self.assertTrue(config.opportunity_engine_enabled)
+
+    def test_env_example_contains_disabled_opportunity_engine_flag(self):
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+
+        self.assertIn(
+            "OPPORTUNITY_ENGINE_ENABLED=false",
+            env_example.read_text(encoding="utf-8"),
+        )
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_alphasift_install_spec_honors_explicit_empty(
         self, _mock_parse_litellm_yaml, _mock_setup_env
     ):

@@ -1,1 +1,1 @@
-AGENTS.md
+D:/workspace/github/daily_stock_analysis/AGENTS.md

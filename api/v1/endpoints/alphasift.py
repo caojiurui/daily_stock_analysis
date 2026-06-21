@@ -115,6 +115,22 @@ def alphasift_hotspot_detail(
     return _service(config).hotspot_detail(topic=topic, provider=provider, refresh=refresh_value)
 
 
+@router.get("/screen/history")
+def alphasift_screen_history(
+    limit: int = Query(20, ge=1, le=100),
+    config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    return _service(config).screen_history(limit=limit)
+
+
+@router.get("/screen/history/{history_id}")
+def alphasift_screen_history_detail(
+    history_id: str,
+    config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    return _service(config).screen_history_detail(history_id=history_id)
+
+
 @router.post("/install")
 def alphasift_install(
     request: Request,

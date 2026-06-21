@@ -531,6 +531,74 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(invalid_target.status_code, 400, invalid_target.text)
         self.assertEqual(invalid_target.json()["error"], "validation_error")
 
+    def test_opportunity_alert_types_require_opt_in_config(self) -> None:
+        resp = self.client.post(
+            "/api/v1/alerts/rules",
+            json={
+                "name": "Sector move",
+                "target_scope": "market",
+                "target": "cn",
+                "alert_type": "sector_move",
+                "parameters": {"min_score": 70, "min_change_pct": 3},
+            },
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertEqual(resp.json()["error"], "unsupported_alert_type")
+        self.assertIn("OPPORTUNITY_ENGINE_ENABLED=true", resp.json()["message"])
+
+    def test_opportunity_alert_rule_can_be_created_when_engine_enabled(self) -> None:
+        with patch("src.services.alert_service.get_config", return_value=Config(opportunity_engine_enabled=True)):
+            created = self._create_rule(
+                {
+                    "name": "Sector move",
+                    "target_scope": "market",
+                    "target": " CN ",
+                    "alert_type": "sector_move",
+                    "parameters": {"min_score": 75, "min_change_pct": 4},
+                }
+            )
+
+        self.assertEqual(created["target_scope"], "market")
+        self.assertEqual(created["target"], "cn")
+        self.assertEqual(created["alert_type"], "sector_move")
+        self.assertEqual(
+            created["parameters"],
+            {"min_score": 75.0, "min_change_pct": 4.0, "cooldown_seconds": 7200},
+        )
+
+    @unittest.skip("obsolete static opportunity dry-run path")
+    def test_dry_run_opportunity_alert_returns_static_skipped_without_history(self) -> None:
+        with patch("src.services.alert_service.get_config", return_value=Config(opportunity_engine_enabled=True)):
+            rule = self._create_rule(
+                {
+                    "name": "News catalyst",
+                    "target_scope": "market",
+                    "target": "cn",
+                    "alert_type": "news_catalyst",
+                    "parameters": {"min_score": 65, "keywords": ["AI", "算力"]},
+                }
+            )
+
+        resp = self.client.post(f"/api/v1/alerts/rules/{rule['id']}/test")
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["target_scope"], "market")
+        self.assertEqual(payload["status"], "not_triggered")
+        self.assertFalse(payload["triggered"])
+        self.assertEqual(payload["evaluated_count"], 1)
+        self.assertEqual(payload["triggered_count"], 0)
+        self.assertEqual(payload["skipped_count"], 1)
+        self.assertIn("Evaluated 1 targets", payload["message"])
+        self.assertEqual(payload["target_results"][0]["target"], "market:cn")
+        self.assertEqual(payload["target_results"][0]["display_target"], "机会引擎 cn")
+        self.assertEqual(payload["target_results"][0]["record_status"], "skipped")
+        self.assertIn("Opportunity alert is stored", payload["target_results"][0]["message"])
+
+        self.assertEqual(self.client.get("/api/v1/alerts/triggers").json()["total"], 0)
+        self.assertEqual(self.client.get("/api/v1/alerts/notifications").json()["total"], 0)
+
     def test_dry_run_market_light_rule_uses_snapshot_and_does_not_write_history(self) -> None:
         rule = self._create_rule({
             "name": "Market risk-off",
@@ -577,6 +645,53 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(payload["target_results"][0]["observed_value"], 35.0)
         build_snapshot.assert_called_once_with("cn")
 
+        self.assertEqual(self.client.get("/api/v1/alerts/triggers").json()["total"], 0)
+        self.assertEqual(self.client.get("/api/v1/alerts/notifications").json()["total"], 0)
+
+    def test_dry_run_opportunity_alert_uses_live_overview_without_history(self) -> None:
+        with patch("src.services.alert_service.get_config", return_value=Config(opportunity_engine_enabled=True)):
+            rule = self._create_rule(
+                {
+                    "name": "News catalyst live",
+                    "target_scope": "market",
+                    "target": "cn",
+                    "alert_type": "news_catalyst",
+                    "parameters": {"min_score": 65, "keywords": ["AI", "绠楀姏"]},
+                }
+            )
+
+        overview = {
+            "enabled": True,
+            "generated_at": "2026-06-20T10:00:00",
+            "top_sectors": [],
+            "opportunities": [],
+            "key_news": [
+                {
+                    "title": "AI 算力需求继续抬升",
+                    "source": "unit-test",
+                    "published_at": "2026-06-20T09:30:00",
+                    "score": 72,
+                    "topics": ["AI算力"],
+                }
+            ],
+        }
+
+        with patch("src.services.opportunity_alerts.OpportunityService.overview", return_value=overview):
+            resp = self.client.post(f"/api/v1/alerts/rules/{rule['id']}/test")
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["target_scope"], "market")
+        self.assertEqual(payload["status"], "triggered")
+        self.assertTrue(payload["triggered"])
+        self.assertEqual(payload["evaluated_count"], 1)
+        self.assertEqual(payload["triggered_count"], 1)
+        self.assertEqual(payload["skipped_count"], 0)
+        self.assertEqual(payload["target_results"][0]["target"], "market:cn")
+        self.assertEqual(payload["target_results"][0]["record_status"], "triggered")
+        self.assertEqual(payload["target_results"][0]["observed_value"], 72.0)
+        self.assertIn("news catalyst matched", payload["target_results"][0]["message"])
+        self.assertIn("AI 算力需求继续抬升", payload["target_results"][0]["message"])
         self.assertEqual(self.client.get("/api/v1/alerts/triggers").json()["total"], 0)
         self.assertEqual(self.client.get("/api/v1/alerts/notifications").json()["total"], 0)
 

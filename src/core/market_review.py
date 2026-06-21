@@ -22,6 +22,7 @@ from src.market_analyzer import MarketAnalyzer
 from src.report_language import normalize_report_language
 from src.search_service import SearchService
 from src.analyzer import AnalysisResult, GeminiAnalyzer
+from src.services.opportunity_review_service import OpportunityReviewService
 from src.services.run_diagnostics import (
     current_diagnostic_snapshot,
     record_history_run,
@@ -553,12 +554,20 @@ def _persist_market_review_history(
         )
 
         db = DatabaseManager.get_instance()
+        enriched_market_review_payload = _enrich_market_review_payload_with_opportunity_review(
+            db=db,
+            region=region,
+            market_review_payload=market_review_payload,
+        )
         saved_history_id = db.save_analysis_history(
             result=result,
             query_id=history_query_id,
             report_type=MARKET_REVIEW_REPORT_TYPE,
             news_content=review_report,
-            context_snapshot=context_snapshot,
+            context_snapshot={
+                **context_snapshot,
+                **({"market_review_payload": enriched_market_review_payload} if enriched_market_review_payload else {}),
+            },
             save_snapshot=True,
         )
         valid_saved_history_id = (
@@ -589,6 +598,51 @@ def _persist_market_review_history(
         )
         logger.warning("大盘复盘历史记录保存异常，报告文件与推送流程继续: %s", exc, exc_info=True)
         return 0
+
+
+def _enrich_market_review_payload_with_opportunity_review(
+    *,
+    db: Any,
+    region: str,
+    market_review_payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(market_review_payload, dict):
+        return market_review_payload
+
+    payload = dict(market_review_payload)
+    review_service = OpportunityReviewService()
+    history_rows = []
+    try:
+        records = db.get_analysis_history(
+            code=MARKET_REVIEW_HISTORY_CODE,
+            days=30,
+            limit=20,
+        )
+        history_rows = review_service.build_review_rows_from_history_records(records, region=region)
+    except Exception as exc:
+        logger.warning("聚合 market review 历史复盘样本失败，回退当前板块信号: %s", exc)
+
+    source = "analysis_history"
+    if not history_rows:
+        sectors = payload.get("sectors")
+        top_sectors = sectors.get("top") if isinstance(sectors, dict) else None
+        history_rows = review_service.build_review_rows_from_sector_snapshots(top_sectors or [])
+        source = "sector_signals"
+
+    sectors = payload.get("sectors")
+    top_sectors = sectors.get("top") if isinstance(sectors, dict) else None
+    if isinstance(sectors, dict) and isinstance(top_sectors, list) and history_rows:
+        payload["sectors"] = {
+            **sectors,
+            "top": review_service.merge_review_rows_into_sector_snapshots(top_sectors, history_rows),
+        }
+
+    payload["opportunity_review"] = {
+        "source": source,
+        "summary": review_service.build_review_snapshot(history_rows),
+        "rows": history_rows[:5],
+    }
+    return payload
 
 
 def _build_market_review_context_overview(

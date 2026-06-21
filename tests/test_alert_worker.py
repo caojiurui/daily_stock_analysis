@@ -1612,6 +1612,53 @@ class AlertWorkerTestCase(unittest.TestCase):
         self.assertEqual(triggers[0]["target"], "account:all")
         self.assertIn("account_id", triggers[0]["diagnostics"])
 
+    def test_opportunity_alert_worker_records_trigger_and_notification(self) -> None:
+        with patch("src.services.alert_service.get_config", return_value=Config(opportunity_engine_enabled=True)):
+            rule = self._create_rule(
+                name="Opportunity catalyst",
+                target_scope="market",
+                target="cn",
+                alert_type="news_catalyst",
+                parameters={"min_score": 65, "keywords": ["AI", "绠楀姏"]},
+            )
+
+        overview = {
+            "enabled": True,
+            "generated_at": "2026-06-20T10:00:00",
+            "top_sectors": [
+                {"name": "AI算力", "score": 78, "change_pct": 4.2, "news_score": 72},
+            ],
+            "opportunities": [
+                {"name": "算力ETF", "code": "516520", "instrument_type": "etf", "score": 79, "sector": "AI算力"},
+            ],
+            "key_news": [
+                {
+                    "title": "AI 算力需求继续抬升",
+                    "source": "unit-test",
+                    "published_at": "2026-06-20T09:30:00",
+                    "score": 72,
+                    "topics": ["AI算力"],
+                }
+            ],
+        }
+        notifier = self._notifier()
+        worker = AlertWorker(config_provider=lambda: self._config(), service=self.service, notifier=notifier)
+
+        with patch("src.services.opportunity_alerts.OpportunityService.overview", return_value=overview):
+            stats = worker.run_once()
+
+        self.assertEqual(stats["loaded"], 1)
+        self.assertEqual(stats["triggered"], 1)
+        self.assertEqual(stats["recorded"], 1)
+        self.assertEqual(stats["notified"], 1)
+        triggers = self._triggers(rule_id=rule["id"], status="triggered")
+        self.assertEqual(len(triggers), 1)
+        self.assertEqual(triggers[0]["target"], "market:cn")
+        self.assertIn("AI", triggers[0]["reason"] or "")
+        notifications = self._notifications(trigger_id=triggers[0]["id"])
+        self.assertEqual(len(notifications), 1)
+        self.assertTrue(notifications[0]["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

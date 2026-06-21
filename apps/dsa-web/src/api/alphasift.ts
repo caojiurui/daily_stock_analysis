@@ -214,6 +214,41 @@ export type AlphaSiftScreenResponse = {
   portfolioConcentrationNotes?: string[];
 };
 
+export type AlphaSiftScreenHistoryItem = {
+  id: string;
+  createdAt: string;
+  strategy: string;
+  market: string;
+  runId?: string;
+  candidateCount: number;
+  snapshotCount?: number | null;
+  afterFilterCount?: number | null;
+  llmRanked?: boolean | null;
+  llmCoverage?: number | null;
+  dsaEnrichment?: AlphaSiftScreenResponse['dsaEnrichment'];
+  candidatesSummary: Array<{
+    rank?: number | null;
+    code: string;
+    name: string;
+    score?: number | null;
+    llmScore?: number | null;
+    riskLevel?: string;
+    industry?: string;
+  }>;
+};
+
+export type AlphaSiftScreenHistoryResponse = {
+  enabled: boolean;
+  history: AlphaSiftScreenHistoryItem[];
+  historyCount: number;
+};
+
+export type AlphaSiftScreenHistoryDetailResponse = {
+  enabled: boolean;
+  history: AlphaSiftScreenHistoryItem;
+  result: AlphaSiftScreenResponse;
+};
+
 export type AlphaSiftScreenAccepted = {
   taskId: string;
   traceId?: string | null;
@@ -281,6 +316,20 @@ export const alphasiftApi = {
   async getScreenTask(taskId: string): Promise<AlphaSiftScreenTaskStatus> {
     const response = await apiClient.get<Record<string, unknown>>(`/api/v1/alphasift/screen/tasks/${encodeURIComponent(taskId)}`);
     return toCamelCase<AlphaSiftScreenTaskStatus>(response.data);
+  },
+
+  async getScreenHistory(limit = 20): Promise<AlphaSiftScreenHistoryResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/screen/history', {
+      params: { limit },
+    });
+    return toCamelCase<AlphaSiftScreenHistoryResponse>(response.data);
+  },
+
+  async getScreenHistoryDetail(historyId: string): Promise<AlphaSiftScreenHistoryDetailResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      `/api/v1/alphasift/screen/history/${encodeURIComponent(historyId)}`,
+    );
+    return toCamelCase<AlphaSiftScreenHistoryDetailResponse>(response.data);
   },
 
   async getStrategies(): Promise<AlphaSiftStrategiesResponse> {

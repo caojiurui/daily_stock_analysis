@@ -640,6 +640,9 @@ class Config:
     alphasift_enabled: bool = False
     alphasift_install_spec: str = DEFAULT_ALPHASIFT_INSTALL_SPEC
 
+    # === Opportunity engine extension (opt-in) ===
+    opportunity_engine_enabled: bool = False
+
     # === AI 分析配置 ===
     # LiteLLM unified model config (provider/model format, e.g. gemini/gemini-3.1-pro-preview)
     litellm_model: str = ""  # Primary model; must include provider prefix when set explicitly
@@ -1815,6 +1818,7 @@ class Config:
                 if os.getenv('ALPHASIFT_INSTALL_SPEC') is None
                 else os.getenv('ALPHASIFT_INSTALL_SPEC', '').strip()
             ),
+            opportunity_engine_enabled=parse_env_bool(os.getenv('OPPORTUNITY_ENGINE_ENABLED'), default=False),
         )
     
     @classmethod

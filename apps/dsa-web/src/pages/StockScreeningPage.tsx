@@ -33,16 +33,37 @@ import {
   type AlphaSiftHotspotDetail,
   type AlphaSiftHotspot,
   type AlphaSiftHotspotsResponse,
+  type AlphaSiftScreenHistoryItem,
   type AlphaSiftScreenResponse,
   type AlphaSiftScreenTaskStatus,
   type AlphaSiftStrategy,
 } from '../api/alphasift';
 import { formatParsedApiError, getParsedApiError, toApiErrorMessage, type ParsedApiError } from '../api/error';
+import { opportunitiesApi, type OpportunityOverview } from '../api/opportunities';
 import { AppPage, Button, InlineAlert } from '../components/common';
+import { useWatchlist } from '../hooks/useWatchlist';
 
 const MARKETS = [{ id: 'cn', label: 'A 股' }];
 const SCREEN_TASK_STORAGE_KEY = 'dsa.alphasift.activeScreenTask.v1';
 const SCREEN_TASK_POLL_INTERVAL_MS = 2000;
+const SCREENING_PRESETS = [
+  { id: 'balanced', label: '均衡', strategy: 'dual_low', maxResults: 6, helper: '兼顾稳健与机会，适合作为默认模式' },
+  { id: 'focused', label: '精选', strategy: 'dual_low', maxResults: 3, helper: '只看少量候选，适合快速浏览' },
+  { id: 'broad', label: '扩展', strategy: 'dual_low', maxResults: 10, helper: '扩大候选池，适合先找方向' },
+] as const;
+const OPPORTUNITY_SCOPE_OPTIONS = [
+  { id: 'balanced', label: '平衡配置' },
+  { id: 'stock', label: '个股优先' },
+  { id: 'etf', label: 'ETF 优先' },
+] as const;
+const OPPORTUNITY_RISK_PROFILE_OPTIONS = [
+  { id: 'conservative', label: '稳健' },
+  { id: 'balanced', label: '平衡' },
+  { id: 'aggressive', label: '激进' },
+] as const;
+
+type OpportunityScope = (typeof OPPORTUNITY_SCOPE_OPTIONS)[number]['id'];
+type OpportunityRiskProfile = (typeof OPPORTUNITY_RISK_PROFILE_OPTIONS)[number]['id'];
 
 type PersistedScreenTask = {
   taskId: string;
@@ -385,6 +406,67 @@ const formatHotspotUpdatedAt = (value: string | null) => {
   });
 };
 
+const formatScreenHistoryTime = (value: string | null | undefined) => {
+  if (!value) {
+    return '-';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+};
+
+const getScreenHistoryTopCandidates = (item: AlphaSiftScreenHistoryItem) =>
+  (item.candidatesSummary || [])
+    .slice(0, 3)
+    .map((candidate) => [candidate.code, candidate.name].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join('銆?) || '-';
+
+const formatOpportunityPosition = (item: OpportunityOverview['opportunities'][number]) => {
+  const budget = item.riskBudget || {};
+  if (budget.positionMinPct == null || budget.positionMaxPct == null) {
+    return '仓位待评估';
+  }
+  return `${budget.positionMinPct}-${budget.positionMaxPct}%`;
+};
+
+const formatOpportunitySingleTradeRisk = (item: OpportunityOverview['opportunities'][number]) => {
+  const singleTradeRiskPct = item.riskBudget?.singleTradeRiskPct;
+  if (singleTradeRiskPct == null || Number.isNaN(Number(singleTradeRiskPct))) {
+    return '单笔风险待评估';
+  }
+  return `单笔风险 <= ${Number(singleTradeRiskPct)}%`;
+};
+
+const formatOpportunityWorkbenchTags = (item: OpportunityOverview['opportunities'][number]) => {
+  const tags = [...(item.tags || [])];
+  if (item.watchlistMatch && !tags.includes('自选相关')) {
+    tags.push('自选相关');
+  }
+  if (item.holdingMatch && !tags.includes('持仓相关')) {
+    tags.push('持仓相关');
+  }
+  return tags;
+};
+
+type OpportunityCatalystMetaItem =
+  | NonNullable<OpportunityOverview['keyNews']>[number]
+  | NonNullable<OpportunityOverview['opportunities'][number]['catalysts']>[number];
+
+const formatOpportunityCatalystMeta = (item: OpportunityCatalystMetaItem) => {
+  const parts = [item.publishedAt, item.source].filter((value) => typeof value === 'string' && value.trim());
+  return parts.length > 0 ? parts.join(' · ') : '近期催化';
+};
+
 const getHotspotStrength = (item: AlphaSiftHotspot, index: number) => {
   const heat = Number(item.heatScore ?? 0);
   const changePct = Number(item.changePct ?? 0);
@@ -435,6 +517,7 @@ const MiniSparkline: React.FC<{ score?: number | null; selected?: boolean }> = (
 
 const StockScreeningPage: React.FC = () => {
   const navigate = useNavigate();
+  const watchlist = useWatchlist();
   const [restoredTask] = useState<PersistedScreenTask | null>(() => readPersistedScreenTask());
   const [enabled, setEnabled] = useState(false);
   const [available, setAvailable] = useState(false);
@@ -462,11 +545,54 @@ const StockScreeningPage: React.FC = () => {
   const [loadingStrategies, setLoadingStrategies] = useState(false);
   const [error, setError] = useState('');
   const [strategyLoadError, setStrategyLoadError] = useState('');
+  const [selectedPresetId, setSelectedPresetId] = useState<(typeof SCREENING_PRESETS)[number]['id']>('focused');
   const [activeTaskId, setActiveTaskId] = useState<string | null>(restoredTask?.taskId ?? null);
   const [taskProgress, setTaskProgress] = useState(restoredTask?.taskId ? 10 : 0);
   const [taskMessage, setTaskMessage] = useState(restoredTask?.taskId ? '正在恢复选股任务状态...' : '');
+  const [opportunityOverview, setOpportunityOverview] = useState<OpportunityOverview | null>(null);
+  const [loadingOpportunityOverview, setLoadingOpportunityOverview] = useState(false);
+  const [opportunityError, setOpportunityError] = useState('');
+  const [selectedOpportunityScope, setSelectedOpportunityScope] = useState<OpportunityScope>('balanced');
+  const [selectedOpportunityRiskProfile, setSelectedOpportunityRiskProfile] = useState<OpportunityRiskProfile>('balanced');
+  const [opportunityNewsQuery, setOpportunityNewsQuery] = useState('');
+  const [opportunityNewsTag, setOpportunityNewsTag] = useState('all');
+  const [watchlistFeedbackCode, setWatchlistFeedbackCode] = useState<string | null>(null);
+  const [screenHistory, setScreenHistory] = useState<AlphaSiftScreenHistoryItem[]>([]);
+  const [loadingScreenHistory, setLoadingScreenHistory] = useState(false);
+  const [screenHistoryError, setScreenHistoryError] = useState('');
+  const [restoringHistoryId, setRestoringHistoryId] = useState<string | null>(null);
 
   const selectedStrategy = useMemo(() => strategies.find((item) => item.id === strategy), [strategies, strategy]);
+  const selectedPreset = useMemo(
+    () => SCREENING_PRESETS.find((item) => item.id === selectedPresetId) || SCREENING_PRESETS[1],
+    [selectedPresetId],
+  );
+  const selectedOpportunityScopeLabel = useMemo(
+    () => OPPORTUNITY_SCOPE_OPTIONS.find((item) => item.id === selectedOpportunityScope)?.label || '平衡配置',
+    [selectedOpportunityScope],
+  );
+  const selectedOpportunityRiskProfileLabel = useMemo(
+    () => OPPORTUNITY_RISK_PROFILE_OPTIONS.find((item) => item.id === selectedOpportunityRiskProfile)?.label || '平衡',
+    [selectedOpportunityRiskProfile],
+  );
+  const opportunityNewsItems = useMemo(() => opportunityOverview?.keyNews || [], [opportunityOverview]);
+  const opportunityNewsTags = useMemo(
+    () => [...new Set(opportunityNewsItems.flatMap((item) => item.topics || []).map((item) => String(item).trim()).filter(Boolean))],
+    [opportunityNewsItems],
+  );
+  const filteredOpportunityNews = useMemo(() => {
+    const keyword = opportunityNewsQuery.trim().toLowerCase();
+    return opportunityNewsItems.filter((item) => {
+      const topics = (item.topics || []).map((value) => String(value).trim()).filter(Boolean);
+      if (opportunityNewsTag !== 'all' && !topics.includes(opportunityNewsTag)) {
+        return false;
+      }
+      if (!keyword) {
+        return true;
+      }
+      return [item.title, item.source, ...topics].filter(Boolean).join(' ').toLowerCase().includes(keyword);
+    });
+  }, [opportunityNewsItems, opportunityNewsQuery, opportunityNewsTag]);
   const selectedStrategyTitle = selectedStrategy?.name || selectedStrategy?.title || '自定义策略';
   const selectedStrategyTag = selectedStrategy?.category || selectedStrategy?.tag || selectedStrategy?.tags?.[0] || '自定义';
   const displayedStrategy = selectedStrategy ? selectedStrategyTitle : `自定义策略 (${strategy})`;
@@ -486,6 +612,26 @@ const StockScreeningPage: React.FC = () => {
     setCandidates(nextCandidates);
     setExpandedCode(nextCandidates[0]?.code ?? null);
   }, []);
+
+  const restoreScreenHistory = useCallback(async (historyId: string) => {
+    setRestoringHistoryId(historyId);
+    setScreenHistoryError('');
+    try {
+      const detail = await alphasiftApi.getScreenHistoryDetail(historyId);
+      applyScreenResult(detail.result);
+      setMarket(detail.result.market || detail.history.market || 'cn');
+      setStrategy(detail.result.strategy || detail.history.strategy || 'dual_low');
+      setMaxResults(Math.max(1, Math.min(100, detail.result.candidateCount || detail.history.candidateCount || 3)));
+      setActiveTaskId(null);
+      setTaskProgress(100);
+      setTaskMessage('已恢复选股历史');
+      clearPersistedScreenTask();
+    } catch (err) {
+      setScreenHistoryError(toApiErrorMessage(err, '选股历史恢复失败，请稍后重试。'));
+    } finally {
+      setRestoringHistoryId(null);
+    }
+  }, [applyScreenResult]);
 
   const clearScreeningResults = () => {
     setCandidates([]);
@@ -551,6 +697,20 @@ const StockScreeningPage: React.FC = () => {
       setStrategyLoadError(err instanceof Error ? err.message : 'AlphaSift 策略列表加载失败');
     } finally {
       setLoadingStrategies(false);
+    }
+  }, []);
+
+  const loadScreenHistory = useCallback(async () => {
+    setLoadingScreenHistory(true);
+    setScreenHistoryError('');
+    try {
+      const result = await alphasiftApi.getScreenHistory(20);
+      setScreenHistory(result.history || []);
+    } catch (err) {
+      setScreenHistory([]);
+      setScreenHistoryError(toApiErrorMessage(err, '选股历史加载失败，请稍后重试。'));
+    } finally {
+      setLoadingScreenHistory(false);
     }
   }, []);
 
@@ -633,6 +793,40 @@ const StockScreeningPage: React.FC = () => {
     });
   }, [navigate]);
 
+  const loadOpportunityOverview = useCallback(async () => {
+    setLoadingOpportunityOverview(true);
+    setOpportunityError('');
+    try {
+      const result = await opportunitiesApi.getOverview({
+        market,
+        scope: selectedOpportunityScope,
+        limit: 6,
+        riskProfile: selectedOpportunityRiskProfile,
+      });
+      setOpportunityOverview(result);
+    } catch (err) {
+      setOpportunityOverview(null);
+      setOpportunityError(toApiErrorMessage(err, '机会摘要加载失败，请稍后重试。'));
+    } finally {
+      setLoadingOpportunityOverview(false);
+    }
+  }, [market, selectedOpportunityRiskProfile, selectedOpportunityScope]);
+
+  const handleToggleOpportunityWatchlist = useCallback(async (stockCode: string) => {
+    const code = String(stockCode || '').trim();
+    if (!code) {
+      return;
+    }
+    setWatchlistFeedbackCode(code);
+    await watchlist.toggleWatchlist(code);
+  }, [watchlist]);
+
+  useEffect(() => {
+    if (opportunityNewsTag !== 'all' && !opportunityNewsTags.includes(opportunityNewsTag)) {
+      setOpportunityNewsTag('all');
+    }
+  }, [opportunityNewsTag, opportunityNewsTags]);
+
   useEffect(() => {
     selectedHotspotTopicRef.current = selectedHotspotTopic;
   }, [selectedHotspotTopic]);
@@ -657,6 +851,10 @@ const StockScreeningPage: React.FC = () => {
         if (status.enabled && status.available) {
           void loadStrategies();
           void loadHotspots(false);
+          void loadScreenHistory();
+        } else {
+          setScreenHistory([]);
+          setScreenHistoryError('');
         }
       })
       .catch(() => {
@@ -668,7 +866,17 @@ const StockScreeningPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [loadHotspots, loadStrategies]);
+  }, [loadHotspots, loadScreenHistory, loadStrategies]);
+
+  useEffect(() => {
+    void loadOpportunityOverview();
+  }, [loadOpportunityOverview]);
+
+  useEffect(() => {
+    if (!watchlist.actionMessage) {
+      setWatchlistFeedbackCode(null);
+    }
+  }, [watchlist.actionMessage]);
 
   useEffect(() => {
     if (!activeTaskId) {
@@ -693,6 +901,7 @@ const StockScreeningPage: React.FC = () => {
       if (task.status === 'completed') {
         if (task.result) {
           applyScreenResult(task.result);
+          void loadScreenHistory();
           setError('');
         } else {
           setError('选股任务已完成，但服务端未返回候选结果。');
@@ -754,7 +963,7 @@ const StockScreeningPage: React.FC = () => {
         window.clearTimeout(timer);
       }
     };
-  }, [activeTaskId, applyScreenResult]);
+  }, [activeTaskId, applyScreenResult, loadScreenHistory]);
 
   const handleEnable = async () => {
     setEnabling(true);
@@ -764,6 +973,7 @@ const StockScreeningPage: React.FC = () => {
       setEnabled(true);
       setAvailable(true);
       await loadStrategies();
+      await loadScreenHistory();
     } catch (err) {
       try {
         const status = await alphasiftApi.getStatus();
@@ -798,6 +1008,20 @@ const StockScreeningPage: React.FC = () => {
       clearScreeningResults();
     }
     setMaxResults(nextMaxResults);
+  };
+
+  const handlePresetChange = (presetId: (typeof SCREENING_PRESETS)[number]['id']) => {
+    const preset = SCREENING_PRESETS.find((item) => item.id === presetId);
+    if (!preset) {
+      return;
+    }
+    setSelectedPresetId(presetId);
+    if (preset.strategy !== strategy) {
+      handleStrategyChange(preset.strategy);
+    }
+    if (preset.maxResults !== maxResults) {
+      handleMaxResultsChange(preset.maxResults);
+    }
   };
 
   const handleSubmit = async () => {
@@ -869,6 +1093,310 @@ const StockScreeningPage: React.FC = () => {
         title="实验功能与风险提示"
         message="AlphaSift 选股仍处于实验性质，结果仅用于研究和辅助判断，不构成投资建议；市场有风险，交易决策和损益由使用者自行承担。"
       />
+
+      <section className="rounded-2xl border border-border/80 bg-card/95 p-4 shadow-soft-card">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <Activity className="h-4 w-4 text-cyan" />
+              机会摘要
+            </div>
+            <p className="mt-2 text-sm leading-6 text-secondary-text">
+              旁路读取板块、ETF 和个股候选，默认只做观察与风险预算，不会直接引导交易。
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            isLoading={loadingOpportunityOverview}
+            loadingText="刷新中..."
+            onClick={() => void loadOpportunityOverview()}
+          >
+            <RefreshCw className="h-4 w-4" />
+            刷新机会摘要
+          </Button>
+        </div>
+
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          <div className="rounded-xl border border-border bg-surface/70 p-3">
+            <p className="text-[11px] font-semibold text-secondary-text">偏好标的</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {OPPORTUNITY_SCOPE_OPTIONS.map((option) => {
+                const selected = option.id === selectedOpportunityScope;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                      selected
+                        ? 'border-cyan bg-cyan/10 text-cyan'
+                        : 'border-border bg-card text-secondary-text hover:border-cyan/40 hover:text-foreground'
+                    }`}
+                    onClick={() => setSelectedOpportunityScope(option.id)}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-surface/70 p-3">
+            <p className="text-[11px] font-semibold text-secondary-text">风险模式</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {OPPORTUNITY_RISK_PROFILE_OPTIONS.map((option) => {
+                const selected = option.id === selectedOpportunityRiskProfile;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                      selected
+                        ? 'border-cyan bg-cyan/10 text-cyan'
+                        : 'border-border bg-card text-secondary-text hover:border-cyan/40 hover:text-foreground'
+                    }`}
+                    onClick={() => setSelectedOpportunityRiskProfile(option.id)}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {opportunityError ? (
+          <div className="mt-4 rounded-xl border border-danger/25 bg-danger/10 px-4 py-3 text-sm text-danger">
+            {opportunityError}
+          </div>
+        ) : null}
+
+        {!opportunityError && opportunityOverview && !opportunityOverview.enabled ? (
+          <div className="mt-4 rounded-xl border border-dashed border-border bg-surface/70 px-4 py-4 text-sm text-secondary-text">
+            机会引擎未开启。需要使用时在 `.env` 设置 OPPORTUNITY_ENGINE_ENABLED=true 后重启服务；关闭状态不影响现有选股和分析流程。
+          </div>
+        ) : null}
+
+        {!opportunityError && opportunityOverview?.enabled ? (
+          <div className="mt-4 grid gap-3 lg:grid-cols-[220px_1fr]">
+            <div className="rounded-xl border border-cyan/25 bg-cyan/10 p-4">
+              <p className="text-xs font-semibold text-secondary-text">市场温度</p>
+              <p className="mt-2 text-3xl font-bold text-foreground">
+                {formatNumber(opportunityOverview.marketTemperature?.score, 0)}
+              </p>
+              <p className="mt-1 text-xs text-secondary-text">
+                {opportunityOverview.marketTemperature?.label || 'unknown'} · 数据质量 {opportunityOverview.dataQuality?.level || '-'}
+              </p>
+              <p className="mt-3 text-xs text-secondary-text">
+                偏好 {selectedOpportunityScopeLabel} · 风险 {selectedOpportunityRiskProfileLabel}
+              </p>
+              <p className="mt-3 text-xs text-secondary-text">
+                自选 {opportunityOverview.portfolioContext?.watchlistCount ?? 0} · 持仓 {opportunityOverview.portfolioContext?.holdingCount ?? 0}
+              </p>
+              {opportunityOverview.riskBudget?.singleTradeRiskPct != null ? (
+                <p className="mt-2 text-xs text-secondary-text">
+                  单笔风险上限 {Number(opportunityOverview.riskBudget.singleTradeRiskPct)}%
+                </p>
+              ) : null}
+            </div>
+            <div className="space-y-3">
+              {opportunityOverview.evidenceSummary?.decisionSignalBand?.length || opportunityOverview.marketOutlook || opportunityOverview.reviewSnapshot ? (
+                <div className="rounded-xl border border-border bg-surface/70 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    <Activity className="h-4 w-4 text-cyan" />
+                    决策证据
+                  </div>
+                  {opportunityOverview.evidenceSummary?.decisionSignalBand?.length ? (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      {opportunityOverview.evidenceSummary.decisionSignalBand.map((item) => (
+                        <div key={item.label} className="rounded-lg border border-border/70 bg-card/80 px-3 py-3">
+                          <p className="text-[11px] text-secondary-text">{item.label}</p>
+                          <p className="mt-1 text-sm font-semibold text-foreground">{item.value}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg border border-cyan/15 bg-cyan/5 px-3 py-3">
+                      <p className="text-[11px] font-semibold text-cyan">
+                        {opportunityOverview.evidenceSummary?.executionMode?.label || opportunityOverview.marketOutlook?.signalStrength || '耐心观察'}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-foreground">
+                        {opportunityOverview.evidenceSummary?.executionMode?.detail || opportunityOverview.marketOutlook?.actionText || '先看主线、再看证据，不直接追涨。'}
+                      </p>
+                      {opportunityOverview.marketOutlook?.predictedDirection ? (
+                        <p className="mt-2 text-[11px] text-secondary-text">
+                          市场判断 {opportunityOverview.marketOutlook.predictedDirection}
+                          {opportunityOverview.marketOutlook.confidencePct != null ? ` · 置信 ${Number(opportunityOverview.marketOutlook.confidencePct).toFixed(0)}%` : ''}
+                        </p>
+                      ) : null}
+                      {opportunityOverview.marketOutlook?.reasoning ? (
+                        <p className="mt-1 text-[11px] leading-5 text-secondary-text">
+                          {opportunityOverview.marketOutlook.reasoning}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="rounded-lg border border-border/70 bg-card/80 px-3 py-3">
+                      <p className="text-[11px] font-semibold text-secondary-text">
+                        {opportunityOverview.reviewSnapshot?.label || '待复盘'}
+                      </p>
+                      <p className="mt-1 text-sm font-semibold text-foreground">
+                        成功率 {Number(opportunityOverview.reviewSnapshot?.successPct || 0).toFixed(0)}%
+                      </p>
+                      <p className="mt-2 text-[11px] text-secondary-text">
+                        关注样本 {opportunityOverview.reviewSnapshot?.focusTotal ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                  {opportunityOverview.evidenceSummary?.comparisonHighlights?.length ? (
+                    <div className="mt-3 grid gap-2 md:grid-cols-3">
+                      {opportunityOverview.evidenceSummary.comparisonHighlights.map((item, index) => (
+                        <div key={`${item.label}-${index}`} className="rounded-lg border border-border/70 bg-card/80 px-3 py-3">
+                          <p className="text-[11px] text-secondary-text">{item.label}</p>
+                          <p className="mt-1 text-sm font-medium text-foreground">{item.value}</p>
+                          {item.detail ? <p className="mt-1 text-[11px] text-secondary-text">{item.detail}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {opportunityNewsItems.length > 0 ? (
+                <div className="rounded-xl border border-border bg-surface/70 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    <Clock3 className="h-4 w-4 text-cyan" />
+                    新闻催化
+                    {opportunityOverview.newsStatus ? (
+                      <span className="rounded-full bg-card px-2 py-0.5 text-[11px] font-medium text-secondary-text">
+                        {opportunityOverview.newsStatus}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+                    <input
+                      value={opportunityNewsQuery}
+                      onChange={(event) => setOpportunityNewsQuery(event.target.value)}
+                      type="text"
+                      placeholder="搜索新闻标题、来源或标签"
+                      className="h-10 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground outline-none transition-colors focus:border-cyan"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setOpportunityNewsTag('all')}
+                        className={`rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                          opportunityNewsTag === 'all'
+                            ? 'border-cyan bg-cyan/10 text-cyan'
+                            : 'border-border bg-card text-secondary-text hover:border-cyan/40 hover:text-foreground'
+                        }`}
+                      >
+                        全部
+                      </button>
+                      {opportunityNewsTags.map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          onClick={() => setOpportunityNewsTag(tag)}
+                          className={`rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                            opportunityNewsTag === tag
+                              ? 'border-cyan bg-cyan/10 text-cyan'
+                              : 'border-border bg-card text-secondary-text hover:border-cyan/40 hover:text-foreground'
+                          }`}
+                        >
+                          {tag}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    {filteredOpportunityNews.slice(0, 6).map((item, index) => (
+                      <div key={`${item.title}-${index}`} className="rounded-lg border border-border/70 bg-card/80 px-3 py-3">
+                        <p className="text-sm font-medium leading-6 text-foreground">{item.title}</p>
+                        <p className="mt-1 text-xs text-secondary-text">
+                          {formatOpportunityCatalystMeta(item)}
+                          {item.topics && item.topics.length > 0 ? ` · 映射 ${item.topics.join(' / ')}` : ''}
+                        </p>
+                      </div>
+                    ))}
+                    {filteredOpportunityNews.length === 0 ? (
+                      <p className="text-xs text-secondary-text">当前筛选条件下暂无匹配新闻。</p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="grid gap-3 md:grid-cols-2">
+                {(opportunityOverview.opportunities || []).slice(0, 4).map((item) => (
+                  <div key={`${item.instrumentType}-${item.code}-${item.name}`} className="rounded-xl border border-border bg-surface/70 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-foreground">{item.name || item.code}</p>
+                        <p className="mt-1 text-xs text-secondary-text">
+                          {item.instrumentType?.toUpperCase?.() || 'ITEM'} · {item.sector || '板块待确认'}
+                        </p>
+                      </div>
+                      <span className="rounded-full bg-cyan/10 px-2.5 py-1 text-xs font-semibold text-cyan">
+                        {formatNumber(item.score, 0)}
+                      </span>
+                    </div>
+                    <p className="mt-3 line-clamp-2 text-xs leading-5 text-secondary-text">{item.reason || '等待机会解释'}</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {(formatOpportunityWorkbenchTags(item)).slice(0, 4).map((tag) => (
+                        <span key={`${item.code}-${tag}`} className="rounded-full bg-card px-2.5 py-1 text-[11px] text-secondary-text">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                    {item.catalysts && item.catalysts.length > 0 ? (
+                      <div className="mt-3 rounded-lg border border-cyan/15 bg-cyan/5 px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-cyan">为什么上榜</p>
+                        <p className="mt-1 text-xs leading-5 text-foreground">{item.catalysts[0].title}</p>
+                        <p className="mt-1 text-[11px] text-secondary-text">{formatOpportunityCatalystMeta(item.catalysts[0])}</p>
+                      </div>
+                    ) : null}
+                    <p className="mt-3 text-xs font-semibold text-foreground">
+                      动作 {item.actionLabel || item.actionBias || '观察'} · 周期 {(item.cycleView?.shortTerm as string) || '待判断'}
+                    </p>
+                    <p className="mt-3 text-xs font-semibold text-foreground">
+                      建议仓位 {formatOpportunityPosition(item)} · {formatOpportunitySingleTradeRisk(item)}
+                    </p>
+                    <p className="mt-2 text-xs font-semibold text-foreground">
+                      筹码 {item.chipStatus?.status || 'unknown'}
+                    </p>
+                    {item.linkedEtfCode ? (
+                      <p className="mt-2 text-xs text-secondary-text">
+                        对应 ETF {item.linkedEtfName || item.linkedEtfCode} · {item.linkedEtfCode}
+                      </p>
+                    ) : null}
+                    {item.portfolioAdvice?.note ? (
+                      <p className="mt-2 text-xs leading-5 text-secondary-text">{String(item.portfolioAdvice.note)}</p>
+                    ) : null}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        variant={watchlist.isInWatchlist(item.code) ? 'danger-subtle' : 'secondary'}
+                        isLoading={watchlist.isActioning}
+                        onClick={() => void handleToggleOpportunityWatchlist(item.code)}
+                      >
+                        {watchlist.isInWatchlist(item.code) ? '从自选移除' : '加入自选'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => navigate('/alerts')}
+                      >
+                        建提醒
+                      </Button>
+                    </div>
+                    {watchlist.actionMessage && watchlistFeedbackCode === item.code ? (
+                      <p className="mt-2 text-[11px] text-secondary-text animate-in fade-in">{watchlist.actionMessage}</p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </section>
 
       {loading ? (
         <InlineAlert
@@ -1171,6 +1699,31 @@ const StockScreeningPage: React.FC = () => {
           参数设置
         </div>
 
+        <div className="mb-4 grid gap-3 md:grid-cols-3">
+          {SCREENING_PRESETS.map((preset) => {
+            const selected = preset.id === selectedPresetId;
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                disabled={loading}
+                onClick={() => handlePresetChange(preset.id)}
+                className={`rounded-xl border px-4 py-3 text-left transition-all ${
+                  selected
+                    ? 'border-cyan bg-cyan/10 shadow-[0_0_0_1px_hsl(var(--primary)/0.15),0_10px_24px_hsl(var(--primary)/0.08)]'
+                    : 'border-border/80 bg-surface/70 hover:border-cyan/45 hover:bg-hover/70'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold text-foreground">{preset.label}</span>
+                  <span className="text-xs text-cyan">{preset.maxResults} 个</span>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-secondary-text">{preset.helper}</p>
+              </button>
+            );
+          })}
+        </div>
+
         <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr_180px_auto] lg:items-end">
           <label className="space-y-2 text-xs font-medium text-secondary-text">
             市场
@@ -1209,6 +1762,7 @@ const StockScreeningPage: React.FC = () => {
               disabled={loading}
               onChange={(event) => handleMaxResultsChange(Number(event.target.value))}
             />
+            <span className="text-[11px] text-secondary-text">当前预设：{selectedPreset.label}</span>
           </label>
 
           <Button
@@ -1269,6 +1823,69 @@ const StockScreeningPage: React.FC = () => {
           message={<ScreenAlertMessage messages={alertMessages} />}
         />
       ) : null}
+
+      <section className="rounded-2xl border border-border bg-card/95 p-4 shadow-soft-card">
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">选股历史</h2>
+            <p className="mt-1 text-sm text-secondary-text">最近完成的 AlphaSift 选股会保存在本地，刷新页面后可从这里恢复查看。</p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            isLoading={loadingScreenHistory}
+            loadingText="刷新中..."
+            onClick={() => void loadScreenHistory()}
+          >
+            <RefreshCw className="h-4 w-4" />
+            刷新历史
+          </Button>
+        </div>
+
+        {screenHistoryError ? (
+          <div className="mb-3 rounded-xl border border-danger/25 bg-danger/10 px-4 py-3 text-sm text-danger">
+            {screenHistoryError}
+          </div>
+        ) : null}
+
+        {screenHistory.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border bg-surface/70 px-5 py-6 text-sm text-secondary-text">
+            暂无选股历史。运行一次选股后，这里会显示最近结果。
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            {screenHistory.map((item) => (
+              <div
+                key={item.id}
+                className="grid gap-3 rounded-xl border border-border bg-surface/70 p-4 lg:grid-cols-[1fr_auto] lg:items-center"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-foreground">
+                    <span>{formatScreenHistoryTime(item.createdAt)}</span>
+                    <span className="rounded-lg bg-cyan/10 px-2 py-1 text-xs text-cyan">{item.strategy || '-'}</span>
+                    <span className="rounded-lg bg-card px-2 py-1 text-xs text-secondary-text">
+                      {item.candidateCount} 条候选
+                    </span>
+                  </div>
+                  <p className="mt-2 truncate text-sm text-secondary-text">{getScreenHistoryTopCandidates(item)}</p>
+                  <p className="mt-1 text-xs text-secondary-text">
+                    Run ID {item.runId || '-'} · 快照 {item.snapshotCount ?? '-'} · LLM {item.llmRanked ? '已重排' : '未重排'}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isLoading={restoringHistoryId === item.id}
+                  loadingText="恢复中..."
+                  onClick={() => void restoreScreenHistory(item.id)}
+                >
+                  查看这次
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="rounded-2xl border border-border bg-card/95 p-4 shadow-soft-card">
         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">

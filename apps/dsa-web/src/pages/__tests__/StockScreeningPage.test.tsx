@@ -7,14 +7,24 @@ const {
   getAlphaSiftStatus,
   getHotspotDetail,
   getHotspots,
+  getOpportunityOverview,
   getStrategies,
+  getScreenHistory,
+  getScreenHistoryDetail,
   getScreenTask,
   navigate,
   resetLastScreenResult,
   screenStocks,
   startScreenTask,
+  setWatchlistActionMessage,
+  watchlistIsInWatchlist,
+  watchlistState,
+  watchlistToggleWatchlist,
 } = vi.hoisted(() => {
   let lastScreenResult: unknown = null;
+  let watchlistActionMessage: string | null = null;
+  const getScreenHistory = vi.fn();
+  const getScreenHistoryDetail = vi.fn();
   const screenStocks = vi.fn();
   const startScreenTask = vi.fn(async (payload: unknown) => {
     lastScreenResult = await screenStocks(payload);
@@ -44,14 +54,33 @@ const {
     getAlphaSiftStatus: vi.fn(),
     getHotspotDetail: vi.fn(),
     getHotspots: vi.fn(),
+    getOpportunityOverview: vi.fn(),
     getStrategies: vi.fn(),
+    getScreenHistory,
+    getScreenHistoryDetail,
     getScreenTask,
     navigate: vi.fn(),
     resetLastScreenResult: () => {
       lastScreenResult = null;
     },
+    setWatchlistActionMessage: (value: string | null) => {
+      watchlistActionMessage = value;
+    },
     screenStocks,
     startScreenTask,
+    watchlistIsInWatchlist: vi.fn((_: string) => false),
+    watchlistToggleWatchlist: vi.fn(),
+    watchlistState: () => ({
+      watchlistCodes: [],
+      isLoading: false,
+      isActioning: false,
+      actionMessage: watchlistActionMessage,
+      isInWatchlist: (stockCode: string) => watchlistIsInWatchlist(stockCode),
+      addToWatchlist: vi.fn(),
+      removeFromWatchlist: vi.fn(),
+      toggleWatchlist: (stockCode: string) => watchlistToggleWatchlist(stockCode),
+      refresh: vi.fn(),
+    }),
   };
 });
 
@@ -70,10 +99,22 @@ vi.mock('../../api/alphasift', () => ({
     getHotspotDetail: (payload: unknown) => getHotspotDetail(payload),
     getHotspots: (payload: unknown) => getHotspots(payload),
     getStrategies: () => getStrategies(),
+    getScreenHistory: (limit?: number) => getScreenHistory(limit),
+    getScreenHistoryDetail: (historyId: string) => getScreenHistoryDetail(historyId),
     getScreenTask: (taskId: string) => getScreenTask(taskId),
     screen: (payload: unknown) => screenStocks(payload),
     startScreen: (payload: unknown) => startScreenTask(payload),
   },
+}));
+
+vi.mock('../../api/opportunities', () => ({
+  opportunitiesApi: {
+    getOverview: (payload: unknown) => getOpportunityOverview(payload),
+  },
+}));
+
+vi.mock('../../hooks/useWatchlist', () => ({
+  useWatchlist: () => watchlistState(),
 }));
 
 const mockStrategiesResponse = {
@@ -109,13 +150,39 @@ describe('StockScreeningPage', () => {
     getAlphaSiftStatus.mockReset();
     getHotspotDetail.mockReset();
     getHotspots.mockReset();
+    getOpportunityOverview.mockReset();
     getStrategies.mockReset();
+    getScreenHistory.mockReset();
+    getScreenHistoryDetail.mockReset();
     getScreenTask.mockClear();
     navigate.mockReset();
     resetLastScreenResult();
     screenStocks.mockReset();
     startScreenTask.mockClear();
+    watchlistIsInWatchlist.mockReset();
+    watchlistIsInWatchlist.mockReturnValue(false);
+    watchlistToggleWatchlist.mockReset();
+    setWatchlistActionMessage(null);
     getStrategies.mockResolvedValue(mockStrategiesResponse);
+    getScreenHistory.mockResolvedValue({ enabled: true, history: [], historyCount: 0 });
+    getScreenHistoryDetail.mockResolvedValue({
+      enabled: true,
+      history: {
+        id: 'history-1',
+        createdAt: '2026-06-21T10:00:00Z',
+        strategy: 'dual_low',
+        market: 'cn',
+        candidateCount: 1,
+        candidatesSummary: [],
+      },
+      result: {
+        enabled: true,
+        candidates: [],
+        candidateCount: 0,
+        strategy: 'dual_low',
+        market: 'cn',
+      },
+    });
     getHotspotDetail.mockResolvedValue({
       enabled: true,
       provider: 'akshare',
@@ -142,7 +209,242 @@ describe('StockScreeningPage', () => {
       stockCount: 1,
     });
     getHotspots.mockResolvedValue({ enabled: true, provider: 'akshare', hotspots: [], hotspotCount: 0 });
+    getOpportunityOverview.mockResolvedValue({
+      enabled: false,
+      marketTemperature: { score: 0, label: 'disabled' },
+      topSectors: [],
+      opportunities: [],
+      dataQuality: { level: 'disabled', warnings: ['opportunity_engine_disabled'] },
+      warnings: ['opportunity_engine_disabled'],
+    });
     window.sessionStorage.clear();
+  });
+
+  it('shows enabled opportunity overview above AlphaSift screening', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 72, label: 'warm' },
+      topSectors: [{ name: 'AI算力', score: 88, changePct: 5.2 }],
+      opportunities: [
+        {
+          code: '300750',
+          name: '宁德时代',
+          instrumentType: 'stock',
+          score: 81,
+          reason: '人气股与板块热度共振。',
+          sector: '电池',
+          riskBudget: { instrumentType: 'stock', positionMinPct: 10, positionMaxPct: 20 },
+          chipStatus: { status: 'unavailable' },
+          dataQuality: 'partial',
+        },
+      ],
+      dataQuality: { level: 'partial', warnings: [] },
+      warnings: [],
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    expect(screen.getByText('72')).toBeInTheDocument();
+    expect(screen.getByText('宁德时代')).toBeInTheDocument();
+    expect(screen.getByText(/建议仓位 10-20%/)).toBeInTheDocument();
+    expect(getOpportunityOverview).toHaveBeenCalledWith({
+      market: 'cn',
+      scope: 'balanced',
+      limit: 6,
+      riskProfile: 'balanced',
+    });
+  });
+
+  it('shows decision signal band, review snapshot, and news filters from opportunity overview', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 72, label: 'warm' },
+      newsStatus: 'success',
+      marketOutlook: { predictedDirection: '看多', predictedBias: 'bullish', confidencePct: 68 },
+      evidenceSummary: {
+        decisionSignalBand: [{ label: '方向', value: '看多', tone: 'bullish' }],
+        executionMode: { label: '顺势进攻', detail: '先看主线、再看证据，不直接追涨。', tone: 'bullish' },
+        comparisonHighlights: [{ label: '主线', value: 'AI算力', tone: 'bullish' }],
+      },
+      reviewSnapshot: { status: 'reviewed', label: '已复盘', successPct: 60, focusTotal: 5 },
+      keyNews: [{ title: 'AI算力景气度提升', source: 'news_search', topics: ['AI算力'] }],
+      topSectors: [],
+      opportunities: [],
+      dataQuality: { level: 'partial', warnings: [] },
+      warnings: [],
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('方向')).toBeInTheDocument();
+    expect(screen.getByText('看多')).toBeInTheDocument();
+    expect(screen.getByText('已复盘')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('搜索新闻标题、来源或标签')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'AI算力' })).toBeInTheDocument();
+  });
+
+  it('shows market outlook reasoning from opportunity overview', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 72, label: 'warm' },
+      marketOutlook: {
+        predictedDirection: '看多',
+        predictedBias: 'bullish',
+        confidencePct: 68,
+        reasoning: 'Lead sector AI compute with a strong setup.',
+      },
+      topSectors: [],
+      opportunities: [],
+      dataQuality: { level: 'partial', warnings: [] },
+      warnings: [],
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('Lead sector AI compute with a strong setup.')).toBeInTheDocument();
+  });
+
+  it('reloads opportunity overview when switching instrument scope and risk profile', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    getOpportunityOverview
+      .mockResolvedValueOnce({
+        enabled: true,
+        marketTemperature: { score: 72, label: 'warm' },
+        riskBudget: { riskProfile: 'balanced', singleTradeRiskPct: 1.5 },
+        topSectors: [],
+        opportunities: [
+          {
+            code: '300750',
+            name: '宁德时代',
+            instrumentType: 'stock',
+            score: 81,
+            reason: 'stock idea',
+            sector: '电池',
+            riskBudget: {
+              instrumentType: 'stock',
+              positionMinPct: 10,
+              positionMaxPct: 20,
+              singleTradeRiskPct: 1.5,
+              riskProfile: 'balanced',
+            },
+            chipStatus: { status: 'unavailable' },
+            dataQuality: 'partial',
+          },
+        ],
+        dataQuality: { level: 'partial', warnings: [] },
+        warnings: [],
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        marketTemperature: { score: 68, label: 'warm' },
+        riskBudget: { riskProfile: 'aggressive', singleTradeRiskPct: 2 },
+        topSectors: [],
+        opportunities: [
+          {
+            code: '512480',
+            name: '半导体ETF',
+            instrumentType: 'etf',
+            score: 79,
+            reason: 'etf idea',
+            sector: 'AI算力',
+            riskBudget: {
+              instrumentType: 'etf',
+              positionMinPct: 25,
+              positionMaxPct: 40,
+              singleTradeRiskPct: 2,
+              riskProfile: 'aggressive',
+            },
+            chipStatus: { status: 'unavailable' },
+            dataQuality: 'partial',
+          },
+        ],
+        dataQuality: { level: 'partial', warnings: [] },
+        warnings: [],
+      });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'ETF 优先' }));
+    fireEvent.click(screen.getByRole('button', { name: '激进' }));
+
+    await waitFor(() =>
+      expect(getOpportunityOverview).toHaveBeenLastCalledWith({
+        market: 'cn',
+        scope: 'etf',
+        limit: 6,
+        riskProfile: 'aggressive',
+      }),
+    );
+    expect(await screen.findByText(/单笔风险 <= 2%/)).toBeInTheDocument();
+  });
+
+  it('wires watchlist actions for opportunity items', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    watchlistIsInWatchlist.mockImplementation((stockCode: string) => stockCode === '300750');
+    getOpportunityOverview.mockResolvedValueOnce({
+      enabled: true,
+      marketTemperature: { score: 72, label: 'warm' },
+      topSectors: [{ name: 'AI算力', score: 88, changePct: 5.2 }],
+      opportunities: [
+        {
+          code: '300750',
+          name: '宁德时代',
+          instrumentType: 'stock',
+          score: 81,
+          reason: '人气股与板块热度共振。',
+          sector: '电池',
+          riskBudget: { instrumentType: 'stock', positionMinPct: 10, positionMaxPct: 20 },
+          chipStatus: { status: 'unavailable' },
+          dataQuality: 'partial',
+        },
+        {
+          code: '512480',
+          name: '半导体ETF',
+          instrumentType: 'etf',
+          score: 79,
+          reason: '板块强度靠前。',
+          sector: 'AI算力',
+          riskBudget: { instrumentType: 'etf', positionMinPct: 20, positionMaxPct: 35 },
+          chipStatus: { status: 'unavailable' },
+          dataQuality: 'partial',
+        },
+      ],
+      dataQuality: { level: 'partial', warnings: [] },
+      warnings: [],
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('机会摘要')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '从自选移除' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '加入自选' }));
+
+    expect(watchlistToggleWatchlist).toHaveBeenCalledWith('512480');
   });
 
   it('re-syncs enabled state when AlphaSift availability check fails after config is enabled', async () => {
@@ -883,6 +1185,68 @@ describe('StockScreeningPage', () => {
     expect(await screen.findByText('恢复后的候选')).toBeInTheDocument();
     expect(screen.getByText('选股完成')).toBeInTheDocument();
     expect(window.sessionStorage.getItem('dsa.alphasift.activeScreenTask.v1')).toBeNull();
+  });
+
+  it('loads and restores completed screening history', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    getScreenHistory.mockResolvedValueOnce({
+      enabled: true,
+      history: [
+        {
+          id: 'history-1',
+          createdAt: '2026-06-21T10:00:00Z',
+          strategy: 'dual_low',
+          market: 'cn',
+          runId: 'run-1',
+          candidateCount: 1,
+          snapshotCount: 100,
+          llmRanked: true,
+          candidatesSummary: [{ code: '600519', name: '贵州茅台', score: 91.2 }],
+        },
+      ],
+      historyCount: 1,
+    });
+    getScreenHistoryDetail.mockResolvedValueOnce({
+      enabled: true,
+      history: {
+        id: 'history-1',
+        createdAt: '2026-06-21T10:00:00Z',
+        strategy: 'dual_low',
+        market: 'cn',
+        candidateCount: 1,
+        candidatesSummary: [{ code: '600519', name: '贵州茅台', score: 91.2 }],
+      },
+      result: {
+        enabled: true,
+        candidates: [
+          {
+            rank: 1,
+            code: '600519',
+            name: '贵州茅台',
+            score: 91.2,
+            reason: 'history result',
+            raw: {},
+          },
+        ],
+        candidateCount: 1,
+        strategy: 'dual_low',
+        market: 'cn',
+      },
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股历史')).toBeInTheDocument();
+    expect(await screen.findByText('600519 贵州茅台')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看这次' }));
+
+    await waitFor(() => expect(getScreenHistoryDetail).toHaveBeenCalledWith('history-1'));
+    expect(await screen.findByText('贵州茅台')).toBeInTheDocument();
+    expect(screen.getByText('閫夎偂瀹屾垚')).toBeInTheDocument();
   });
 
   it('keeps a restored screening task recoverable when status polling times out', async () => {

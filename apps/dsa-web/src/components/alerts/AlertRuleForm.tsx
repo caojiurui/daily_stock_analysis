@@ -52,6 +52,9 @@ const PORTFOLIO_ALERT_TYPE_OPTIONS = [
 const MARKET_ALERT_TYPE_OPTIONS = [
   { value: 'market_light_status', label: '大盘红绿灯状态' },
   { value: 'market_light_score_drop', label: '大盘红绿灯分数下降' },
+  { value: 'sector_move', label: '板块异动机会' },
+  { value: 'news_catalyst', label: '新闻催化机会' },
+  { value: 'opportunity_score_cross', label: '机会分数突破' },
 ];
 
 const TARGET_SCOPE_OPTIONS = [
@@ -160,6 +163,9 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
   const [dPeriod, setDPeriod] = useState('3');
   const [marketLightStatuses, setMarketLightStatuses] = useState<MarketLightStatus[]>(['red', 'yellow']);
   const [minDrop, setMinDrop] = useState('10');
+  const [minScore, setMinScore] = useState('70');
+  const [minChangePct, setMinChangePct] = useState('3');
+  const [keywords, setKeywords] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -226,6 +232,14 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
       setMarketLightStatuses(['red', 'yellow']);
     } else if (nextType === 'market_light_score_drop') {
       setMinDrop('10');
+    } else if (nextType === 'sector_move') {
+      setMinScore('70');
+      setMinChangePct('3');
+    } else if (nextType === 'news_catalyst') {
+      setMinScore('60');
+      setKeywords('');
+    } else if (nextType === 'opportunity_score_cross') {
+      setThreshold('75');
     }
   };
 
@@ -359,6 +373,25 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
       if (parsedMinDrop == null) return null;
       return { minDrop: parsedMinDrop };
     }
+    if (alertType === 'sector_move') {
+      const parsedMinScore = parsePositiveNumber(minScore, 'Min score');
+      const parsedMinChangePct = parsePositiveNumber(minChangePct, 'Min change %');
+      if (parsedMinScore == null || parsedMinChangePct == null) return null;
+      return { minScore: parsedMinScore, minChangePct: parsedMinChangePct };
+    }
+    if (alertType === 'news_catalyst') {
+      const parsedMinScore = parsePositiveNumber(minScore, 'Min score');
+      if (parsedMinScore == null) return null;
+      return {
+        minScore: parsedMinScore,
+        keywords: keywords.split(/[\n,，]/).map((item) => item.trim()).filter(Boolean),
+      };
+    }
+    if (alertType === 'opportunity_score_cross') {
+      const parsedThreshold = parsePositiveNumber(threshold, 'Opportunity score');
+      if (parsedThreshold == null) return null;
+      return { direction: 'above', threshold: parsedThreshold };
+    }
     return {};
   };
 
@@ -422,6 +455,9 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
     setDPeriod('3');
     setMarketLightStatuses(['red', 'yellow']);
     setMinDrop('10');
+    setMinScore('70');
+    setMinChangePct('3');
+    setKeywords('');
     resetParameters(alertType);
     setEnabled(true);
   };
@@ -770,6 +806,62 @@ export const AlertRuleForm: React.FC<AlertRuleFormProps> = ({ onSubmit, isSubmit
             step="1"
             value={minDrop}
             onChange={(event) => setMinDrop(event.target.value)}
+            disabled={isSubmitting}
+          />
+        ) : null}
+
+        {alertType === 'sector_move' ? (
+          <div className="grid gap-4 md:grid-cols-2">
+            <Input
+              label="Min score"
+              type="number"
+              min="0"
+              step="1"
+              value={minScore}
+              onChange={(event) => setMinScore(event.target.value)}
+              disabled={isSubmitting}
+            />
+            <Input
+              label="Min change %"
+              type="number"
+              min="0"
+              step="0.1"
+              value={minChangePct}
+              onChange={(event) => setMinChangePct(event.target.value)}
+              disabled={isSubmitting}
+            />
+          </div>
+        ) : null}
+
+        {alertType === 'news_catalyst' ? (
+          <div className="grid gap-4 md:grid-cols-2">
+            <Input
+              label="Min score"
+              type="number"
+              min="0"
+              step="1"
+              value={minScore}
+              onChange={(event) => setMinScore(event.target.value)}
+              disabled={isSubmitting}
+            />
+            <Input
+              label="Keywords"
+              value={keywords}
+              onChange={(event) => setKeywords(event.target.value)}
+              placeholder="AI, 算力"
+              disabled={isSubmitting}
+            />
+          </div>
+        ) : null}
+
+        {alertType === 'opportunity_score_cross' ? (
+          <Input
+            label="Opportunity score"
+            type="number"
+            min="0"
+            step="1"
+            value={threshold}
+            onChange={(event) => setThreshold(event.target.value)}
             disabled={isSubmitting}
           />
         ) : null}

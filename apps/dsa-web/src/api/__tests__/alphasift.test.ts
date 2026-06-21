@@ -290,4 +290,60 @@ describe('alphasiftApi', () => {
     expect(result.result?.dailyEnrichCount).toBe(4);
     expect(result.result?.postAnalyzers).toEqual(['scorecard']);
   });
+
+  it('loads screening history list', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        enabled: true,
+        history: [
+          {
+            id: 'hist-1',
+            created_at: '2026-06-21T10:00:00Z',
+            strategy: 'dual_low',
+            market: 'cn',
+            run_id: 'run-1',
+            candidate_count: 1,
+            candidates_summary: [{ code: '600519', name: '贵州茅台', score: 91.2 }],
+          },
+        ],
+        history_count: 1,
+      },
+    });
+
+    const result = await alphasiftApi.getScreenHistory(10);
+
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/screen/history', { params: { limit: 10 } });
+    expect(result.historyCount).toBe(1);
+    expect(result.history[0].createdAt).toBe('2026-06-21T10:00:00Z');
+    expect(result.history[0].candidatesSummary[0].code).toBe('600519');
+  });
+
+  it('loads screening history detail', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        enabled: true,
+        history: {
+          id: 'hist-1',
+          created_at: '2026-06-21T10:00:00Z',
+          strategy: 'dual_low',
+          market: 'cn',
+          candidate_count: 1,
+          candidates_summary: [],
+        },
+        result: {
+          enabled: true,
+          candidates: [{ rank: 1, code: '600519', name: '贵州茅台', reason: 'pick', raw: {} }],
+          candidate_count: 1,
+          strategy: 'dual_low',
+          market: 'cn',
+        },
+      },
+    });
+
+    const result = await alphasiftApi.getScreenHistoryDetail('hist-1');
+
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/screen/history/hist-1');
+    expect(result.result.candidateCount).toBe(1);
+    expect(result.result.candidates[0].name).toBe('贵州茅台');
+  });
 });
