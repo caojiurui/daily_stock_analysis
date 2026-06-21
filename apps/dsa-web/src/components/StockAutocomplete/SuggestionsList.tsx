@@ -58,6 +58,16 @@ export function SuggestionsList({
         >
           <div className="flex items-center gap-3">
             <MarketBadge market={suggestion.market} />
+            {suggestion.assetType === 'etf' ? (
+              <Badge variant="default" size="sm" className="min-w-[3rem] justify-center border-warning/25 bg-warning/10 text-warning shadow-none">
+                ETF
+              </Badge>
+            ) : null}
+            {suggestion.assetType === 'index' ? (
+              <Badge variant="default" size="sm" className="min-w-[3rem] justify-center border-purple/25 bg-purple/10 text-purple shadow-none">
+                指数
+              </Badge>
+            ) : null}
 
             <div className="flex flex-col">
               <span className="text-sm font-medium text-primary-text">

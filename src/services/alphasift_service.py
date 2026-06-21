@@ -27,6 +27,13 @@ from pydantic import BaseModel, Field
 
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
+from src.extensions.opportunity.ths_provider import (
+    extract_ths_flashnews_tag_id,
+    fetch_ths_flashnews_items,
+    format_ths_flashnews_event,
+)
+from src.llm.errors import call_litellm_with_param_recovery
+from src.llm.generation_params import apply_litellm_generation_params, resolve_litellm_temperature_directive
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,7 @@ DSA_ALPHASIFT_CANDIDATE_CONTEXT_PROVIDERS = "news,fund_flow,announcement,quote"
 DSA_ALPHASIFT_DATA_DIR = Path("data") / "alphasift"
 DSA_ALPHASIFT_HOTSPOT_CACHE_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspots.json"
 DSA_ALPHASIFT_HOTSPOT_HISTORY_PATH = DSA_ALPHASIFT_DATA_DIR / "hotspot.history.jsonl"
+DSA_ALPHASIFT_SCREEN_HISTORY_PATH = DSA_ALPHASIFT_DATA_DIR / "screen.history.jsonl"
 DSA_ALPHASIFT_MIN_HOTSPOT_CACHE_COUNT = 3
 DSA_ALPHASIFT_HOTSPOT_DETAIL_CACHE_TTL_SECONDS = 30 * 60
 DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS = 90
@@ -69,6 +77,7 @@ DSA_ALPHASIFT_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
 )
 _DSA_FETCHER_MANAGER_LOCK = threading.RLock()
 _DSA_FETCHER_MANAGER: Any = None
+_ALPHASIFT_SCREEN_HISTORY_LOCK = threading.RLock()
 _FUNDAMENTAL_BLOCKS = ("valuation", "growth", "earnings", "institution", "capital_flow", "boards")
 _ALPHASIFT_LITELLM_COMPLETION_ROUTES: ContextVar[Optional[Tuple[Dict[str, Any], ...]]] = ContextVar(
     "alphasift_litellm_completion_routes",
@@ -111,6 +120,12 @@ def _alphasift_hotspot_history_path() -> Path:
     if _env_text(os.getenv("ALPHASIFT_DATA_DIR")):
         return _resolve_alphasift_data_dir() / "hotspot.history.jsonl"
     return DSA_ALPHASIFT_HOTSPOT_HISTORY_PATH
+
+
+def _alphasift_screen_history_path() -> Path:
+    if _env_text(os.getenv("ALPHASIFT_DATA_DIR")):
+        return _resolve_alphasift_data_dir() / "screen.history.jsonl"
+    return DSA_ALPHASIFT_SCREEN_HISTORY_PATH
 
 
 def _alphasift_hotspot_detail_cache_dir() -> Path:
@@ -229,6 +244,152 @@ def _extract_nested_hotspot_leader_stocks(payload: Dict[str, Any]) -> List[Any]:
         if isinstance(leader_stocks, list) and leader_stocks:
             return leader_stocks
     return []
+
+
+def _screen_history_candidate_summary(candidates: Any) -> List[Dict[str, Any]]:
+    if not isinstance(candidates, list):
+        return []
+    summary: List[Dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            {
+                "rank": item.get("rank"),
+                "code": item.get("code") or "",
+                "name": item.get("name") or "",
+                "score": item.get("score"),
+                "llm_score": item.get("llm_score"),
+                "risk_level": item.get("risk_level") or "",
+                "industry": item.get("industry") or "",
+            }
+        )
+    return summary
+
+
+def _build_screen_history_record(payload: Dict[str, Any]) -> Dict[str, Any]:
+    created_at = _utc_now_iso()
+    record_id_source = f"{payload.get('run_id') or ''}\0{payload.get('strategy') or ''}\0{created_at}"
+    history_id = hashlib.sha1(record_id_source.encode("utf-8")).hexdigest()[:16]
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        candidates = []
+    return {
+        "schema_version": 1,
+        "id": history_id,
+        "created_at": created_at,
+        "strategy": payload.get("strategy") or "",
+        "market": payload.get("market") or "",
+        "run_id": payload.get("run_id") or "",
+        "candidate_count": payload.get("candidate_count") if payload.get("candidate_count") is not None else len(candidates),
+        "snapshot_count": payload.get("snapshot_count"),
+        "after_filter_count": payload.get("after_filter_count"),
+        "llm_ranked": payload.get("llm_ranked"),
+        "llm_coverage": payload.get("llm_coverage"),
+        "dsa_enrichment": payload.get("dsa_enrichment") if isinstance(payload.get("dsa_enrichment"), dict) else {},
+        "candidates_summary": _screen_history_candidate_summary(candidates),
+        "payload": payload,
+    }
+
+
+def _write_alphasift_screen_history(payload: Dict[str, Any]) -> None:
+    history_path = _alphasift_screen_history_path()
+    try:
+        record = _remove_non_finite_json_values(_build_screen_history_record(dict(payload)))
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        with _ALPHASIFT_SCREEN_HISTORY_LOCK:
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            with history_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except Exception as exc:
+        logger.warning("Failed to write AlphaSift screen history: %s", exc)
+
+
+def _screen_history_item(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    history_id = _env_text(record.get("id"))
+    if not history_id:
+        return None
+    candidate_count = record.get("candidate_count")
+    if candidate_count is None:
+        candidate_count = payload.get("candidate_count")
+    return {
+        "id": history_id,
+        "created_at": record.get("created_at") or "",
+        "strategy": record.get("strategy") or payload.get("strategy") or "",
+        "market": record.get("market") or payload.get("market") or "",
+        "run_id": record.get("run_id") or payload.get("run_id") or "",
+        "candidate_count": candidate_count if candidate_count is not None else 0,
+        "snapshot_count": record.get("snapshot_count") if record.get("snapshot_count") is not None else payload.get("snapshot_count"),
+        "after_filter_count": (
+            record.get("after_filter_count")
+            if record.get("after_filter_count") is not None
+            else payload.get("after_filter_count")
+        ),
+        "llm_ranked": record.get("llm_ranked") if "llm_ranked" in record else payload.get("llm_ranked"),
+        "llm_coverage": record.get("llm_coverage") if record.get("llm_coverage") is not None else payload.get("llm_coverage"),
+        "dsa_enrichment": record.get("dsa_enrichment") if isinstance(record.get("dsa_enrichment"), dict) else payload.get("dsa_enrichment") or {},
+        "candidates_summary": record.get("candidates_summary") if isinstance(record.get("candidates_summary"), list) else _screen_history_candidate_summary(payload.get("candidates")),
+    }
+
+
+def _read_alphasift_screen_history_records(limit: int) -> List[Dict[str, Any]]:
+    history_path = _alphasift_screen_history_path()
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        logger.warning("Failed to read AlphaSift screen history from %s: %s", history_path, exc)
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for line in reversed(lines):
+        if len(records) >= limit:
+            break
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and _screen_history_item(record):
+            records.append(record)
+    return records
+
+
+def _read_alphasift_screen_history(limit: int) -> List[Dict[str, Any]]:
+    return [
+        item
+        for item in (_screen_history_item(record) for record in _read_alphasift_screen_history_records(limit))
+        if item is not None
+    ]
+
+
+def _find_alphasift_screen_history_record(history_id: str) -> Optional[Dict[str, Any]]:
+    target = _env_text(history_id)
+    if not target:
+        return None
+    history_path = _alphasift_screen_history_path()
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Failed to read AlphaSift screen history from %s: %s", history_path, exc)
+        return None
+    for line in reversed(lines):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("id") == target:
+            return record
+    return None
 
 
 def _load_alphasift_hotspot_cache(*, provider: str, top: int) -> Optional[Dict[str, Any]]:
@@ -841,6 +1002,37 @@ class AlphaSiftService:
         _ensure_alphasift_enabled(self.config)
         return _install_alphasift(self.config)
 
+    def screen_history(self, *, limit: int = 20) -> Dict[str, Any]:
+        _ensure_alphasift_enabled(self.config)
+        history_limit = max(1, min(int(limit or 20), 100))
+        items = _read_alphasift_screen_history(history_limit)
+        return {
+            "enabled": True,
+            "history": items,
+            "history_count": len(items),
+        }
+
+    def screen_history_detail(self, *, history_id: str) -> Dict[str, Any]:
+        _ensure_alphasift_enabled(self.config)
+        record = _find_alphasift_screen_history_record(history_id)
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "alphasift_screen_history_not_found", "message": "选股历史不存在或已被清理。"},
+            )
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else None
+        if not payload:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "alphasift_screen_history_payload_missing", "message": "选股历史详情不可用。"},
+            )
+        item = _screen_history_item(record) or {}
+        return {
+            "enabled": True,
+            "history": item,
+            "result": payload,
+        }
+
     def hotspots(
         self,
         *,
@@ -1101,7 +1293,7 @@ class AlphaSiftService:
         candidates = _normalize_candidates(raw_data)
         selected = candidates[:max_results]
         selected, dsa_enrichment = _enrich_candidates_with_dsa(selected)
-        return {
+        payload = {
             "enabled": True,
             "candidates": selected,
             "candidate_count": len(selected),
@@ -1128,6 +1320,8 @@ class AlphaSiftService:
             "portfolio_diversity_enabled": raw_data.get("portfolio_diversity_enabled"),
             "portfolio_concentration_notes": raw_data.get("portfolio_concentration_notes") or [],
         }
+        _write_alphasift_screen_history(payload)
+        return payload
 
 
 def _normalize_alphasift_hotspot_detail(detail: Any, *, provider: str, requested_topic: str) -> Dict[str, Any]:
@@ -1870,14 +2064,18 @@ def _build_alphasift_runtime_env(config: Config, *, max_results: Optional[int] =
         put(key, value)
 
     litellm_model, fallback_models = _resolve_alphasift_llm_models(config)
+    channels = _normalize_dsa_llm_channels(config)
+    model_list = _build_alphasift_litellm_model_list(config, channels)
+    temperature_directive = resolve_litellm_temperature_directive(
+        litellm_model,
+        model_list=model_list,
+    )
     put("LITELLM_MODEL", litellm_model)
     if fallback_models:
         put("LITELLM_FALLBACK_MODELS", ",".join(fallback_models))
     put("LITELLM_CONFIG", config.litellm_config_path)
-    if os.getenv("LLM_TEMPERATURE") not in (None, ""):
+    if os.getenv("LLM_TEMPERATURE") not in (None, "") and not temperature_directive.omit_temperature:
         put("LLM_TEMPERATURE", config.llm_temperature)
-
-    channels = _normalize_dsa_llm_channels(config)
     if channels:
         put("LLM_CHANNELS", ",".join(channel["name"] for channel in channels))
         for channel in channels:
@@ -2471,6 +2669,15 @@ class DsaEastMoneyHotspotProvider:
                 "published_at": day,
             }
 
+        ths_flashnews = self._fetch_ths_flashnews_event(topic)
+        if ths_flashnews:
+            event_date = self._extract_route_date(ths_flashnews) or today
+            put_daily_item(
+                date=event_date,
+                title="题材驱动",
+                description=ths_flashnews,
+                source="ths_flashnews",
+            )
         ths_event = self._fetch_ths_summary_event(topic)
         if ths_event:
             event_date = self._extract_route_date(ths_event) or today
@@ -2559,6 +2766,24 @@ class DsaEastMoneyHotspotProvider:
         date = _env_text(row.get("日期"))
         event = _env_text(row.get("驱动事件"))
         return f"{date}：{event}" if date and event else event
+
+    def _fetch_ths_flashnews_event(self, topic: str) -> str:
+        info = self._fetch_ths_info(topic)
+        tag_id = extract_ths_flashnews_tag_id(info)
+        if not tag_id:
+            return ""
+        try:
+            items = fetch_ths_flashnews_items(
+                tag_id=tag_id,
+                limit=1,
+                timeout_seconds=self._HTTP_TIMEOUT_SECONDS,
+                session=self._session,
+            )
+        except Exception:
+            return ""
+        if not items:
+            return ""
+        return format_ths_flashnews_event(items[0], max_chars=DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS)
 
     def _fetch_ths_info(self, topic: str) -> Dict[str, str]:
         import akshare as ak
@@ -2805,13 +3030,26 @@ def _build_alphasift_context(config: Config, *, max_results: Optional[int] = Non
     # 参见 https://docs.litellm.ai/docs/proxy/configs#the-model_list-key
     channels = _normalize_dsa_llm_channels(config)
     litellm_model, fallback_models = _resolve_alphasift_llm_models(config)
+    model_list = _build_alphasift_litellm_model_list(config, channels)
+    temperature_directive = resolve_litellm_temperature_directive(
+        litellm_model,
+        model_list=model_list,
+    )
     return {
         "llm": {
             "model": litellm_model,
             "fallback_models": fallback_models,
-            "temperature": config.llm_temperature,
+            "temperature": (
+                None
+                if temperature_directive.omit_temperature
+                else (
+                    temperature_directive.temperature
+                    if temperature_directive.temperature is not None
+                    else config.llm_temperature
+                )
+            ),
             "channels": channels,
-            "model_list": _build_alphasift_litellm_model_list(config, channels),
+            "model_list": model_list,
             "litellm_config_path": config.litellm_config_path or "",
             "candidate_context_enabled": False,
             "candidate_multiplier": DSA_ALPHASIFT_LLM_CANDIDATE_MULTIPLIER,

@@ -456,6 +456,139 @@ class MarketReviewLocalizationTestCase(unittest.TestCase):
                 else:
                     os.environ["DATABASE_PATH"] = old_db_path
 
+    def test_persist_market_review_history_enriches_payload_with_opportunity_review_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_db_path = os.environ.get("DATABASE_PATH")
+            os.environ["DATABASE_PATH"] = os.path.join(temp_dir, "market_review_opportunity_review.db")
+            Config._instance = None
+            DatabaseManager.reset_instance()
+            try:
+                saved = market_review_module._persist_market_review_history(
+                    review_report="## 今日大盘\n\n复盘正文",
+                    markdown_report="# 📆 大盘复盘\n\n## 今日大盘\n\n复盘正文",
+                    region="cn",
+                    config=SimpleNamespace(report_language="zh"),
+                    query_id="market-task-opportunity-review",
+                    market_light_snapshots={
+                        "cn": {
+                            "region": "cn",
+                            "trade_date": "2026-03-06",
+                            "status": "yellow",
+                            "score": 55,
+                        }
+                    },
+                    market_review_payload={
+                        "version": 1,
+                        "kind": "market_review",
+                        "region": "cn",
+                        "sectors": {
+                            "top": [
+                                {"name": "AI-Compute", "review_hit_rate": 0.75, "review_attempts": 4},
+                                {"name": "Robotics", "review_hit_rate": 0.5, "review_attempts": 2},
+                            ],
+                            "bottom": [],
+                        },
+                        "sections": [{"title": "今日大盘", "markdown": "复盘正文"}],
+                    },
+                )
+
+                self.assertGreater(saved, 0)
+                db = DatabaseManager.get_instance()
+                with db.get_session() as session:
+                    row = session.query(AnalysisHistory).filter(
+                        AnalysisHistory.query_id == "market-task-opportunity-review"
+                    ).first()
+                    self.assertIsNotNone(row)
+                    snapshot = json.loads(row.context_snapshot or "{}")
+                    opportunity_review = snapshot["market_review_payload"]["opportunity_review"]
+                    self.assertEqual(opportunity_review["source"], "sector_signals")
+                    self.assertEqual(opportunity_review["summary"]["status"], "reviewed")
+                    self.assertEqual(opportunity_review["summary"]["focus_total"], 6)
+                    self.assertEqual(opportunity_review["summary"]["success_count"], 4)
+                    self.assertEqual(len(opportunity_review["rows"]), 2)
+            finally:
+                DatabaseManager.reset_instance()
+                Config._instance = None
+                if old_db_path is None:
+                    os.environ.pop("DATABASE_PATH", None)
+                else:
+                    os.environ["DATABASE_PATH"] = old_db_path
+
+    def test_persist_market_review_history_backfills_sector_review_stats_from_history_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_db_path = os.environ.get("DATABASE_PATH")
+            os.environ["DATABASE_PATH"] = os.path.join(temp_dir, "market_review_sector_stats.db")
+            Config._instance = None
+            DatabaseManager.reset_instance()
+            try:
+                first_saved = market_review_module._persist_market_review_history(
+                    review_report="## 昨日大盘\n\n复盘正文",
+                    markdown_report="# 📆 大盘复盘\n\n## 昨日大盘\n\n复盘正文",
+                    region="cn",
+                    config=SimpleNamespace(report_language="zh"),
+                    query_id="market-task-history-source",
+                    market_review_payload={
+                        "version": 1,
+                        "kind": "market_review",
+                        "region": "cn",
+                        "sectors": {
+                            "top": [
+                                {"name": "AI-Compute", "review_hit_rate": 0.75, "review_attempts": 4},
+                                {"name": "Robotics", "review_hit_rate": 0.5, "review_attempts": 2},
+                            ],
+                            "bottom": [],
+                        },
+                        "sections": [{"title": "昨日大盘", "markdown": "复盘正文"}],
+                    },
+                )
+                self.assertGreater(first_saved, 0)
+
+                second_saved = market_review_module._persist_market_review_history(
+                    review_report="## 今日大盘\n\n复盘正文",
+                    markdown_report="# 📆 大盘复盘\n\n## 今日大盘\n\n复盘正文",
+                    region="cn",
+                    config=SimpleNamespace(report_language="zh"),
+                    query_id="market-task-history-backfill",
+                    market_review_payload={
+                        "version": 1,
+                        "kind": "market_review",
+                        "region": "cn",
+                        "sectors": {
+                            "top": [
+                                {"name": "AI-Compute"},
+                                {"name": "Robotics"},
+                            ],
+                            "bottom": [],
+                        },
+                        "sections": [{"title": "今日大盘", "markdown": "复盘正文"}],
+                    },
+                )
+
+                self.assertGreater(second_saved, 0)
+                db = DatabaseManager.get_instance()
+                with db.get_session() as session:
+                    row = session.query(AnalysisHistory).filter(
+                        AnalysisHistory.query_id == "market-task-history-backfill"
+                    ).first()
+                    self.assertIsNotNone(row)
+                    snapshot = json.loads(row.context_snapshot or "{}")
+                    top_sectors = snapshot["market_review_payload"]["sectors"]["top"]
+                    self.assertEqual(top_sectors[0]["review_attempts"], 4)
+                    self.assertEqual(top_sectors[0]["review_success_count"], 3)
+                    self.assertEqual(top_sectors[0]["review_failure_count"], 1)
+                    self.assertEqual(top_sectors[0]["review_hit_rate"], 75.0)
+                    self.assertEqual(top_sectors[1]["review_attempts"], 2)
+                    self.assertEqual(top_sectors[1]["review_success_count"], 1)
+                    self.assertEqual(top_sectors[1]["review_failure_count"], 1)
+                    self.assertEqual(top_sectors[1]["review_hit_rate"], 50.0)
+            finally:
+                DatabaseManager.reset_instance()
+                Config._instance = None
+                if old_db_path is None:
+                    os.environ.pop("DATABASE_PATH", None)
+                else:
+                    os.environ["DATABASE_PATH"] = old_db_path
+
     def test_run_market_review_persists_notification_diagnostics_after_history_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             old_db_path = os.environ.get("DATABASE_PATH")

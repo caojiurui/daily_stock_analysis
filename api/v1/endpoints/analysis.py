@@ -98,6 +98,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SUPPORTED_FREE_TEXT_RE = re.compile(r"^[A-Za-z0-9.*\-+\u3400-\u9fff\s]+$")
+_ANALYSIS_INPUT_TRANSLATION = str.maketrans({
+    "（": "(",
+    "）": ")",
+    "【": "[",
+    "】": "]",
+    "\u3000": " ",
+    "\u00a0": " ",
+})
+_ENCLOSING_PAIRS = {
+    ("(", ")"),
+    ("[", "]"),
+}
 
 
 def _get_task_trace_id(task: Any) -> Optional[str]:
@@ -190,6 +202,36 @@ def _is_obviously_invalid_analysis_input(text: str) -> bool:
     return has_letters and has_digits
 
 
+def _preprocess_analysis_input(raw_value: str) -> str:
+    """Tolerate common manual input noise before code/name resolution."""
+    text = (raw_value or "").translate(_ANALYSIS_INPUT_TRANSLATION).strip()
+    if not text:
+        return ""
+
+    while len(text) >= 2 and (text[0], text[-1]) in _ENCLOSING_PAIRS:
+        inner = text[1:-1].strip()
+        if not inner:
+            break
+        text = inner
+
+    if is_code_like(text):
+        return text
+
+    bracket_candidates = re.findall(r"[\(\[]\s*([^\(\)\[\]]+?)\s*[\)\]]", text)
+    for candidate in bracket_candidates:
+        normalized_candidate = candidate.strip()
+        if is_code_like(normalized_candidate):
+            return normalized_candidate
+
+    base_with_label = re.match(r"^([^\(\)\[\]]+?)\s*[\(\[]\s*[^\(\)\[\]]+\s*[\)\]]$", text)
+    if base_with_label:
+        base = base_with_label.group(1).strip()
+        if is_code_like(base):
+            return base
+
+    return text
+
+
 def _resolve_and_normalize_input(raw_value: str) -> str:
     """
     Resolve and normalize a stock input for analysis requests.
@@ -198,7 +240,7 @@ def _resolve_and_normalize_input(raw_value: str) -> str:
     Non-code inputs must resolve to a known stock code. Obvious garbage
     input is rejected before expensive resolver and task-queue work.
     """
-    text = (raw_value or "").strip()
+    text = _preprocess_analysis_input(raw_value)
     if not text:
         return ""
 

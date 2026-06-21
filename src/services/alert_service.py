@@ -55,6 +55,12 @@ from src.services.market_light_alerts import (
     make_market_light_payload,
     normalize_market_alert_parameters,
 )
+from src.services.opportunity_alerts import (
+    OPPORTUNITY_ALERT_DATA_SOURCE,
+    OpportunityAlert,
+    evaluate_opportunity_alert,
+    make_opportunity_payload,
+)
 from src.services.market_light_service import normalize_market_region
 from src.services.decision_signal_summary import summarize_decision_signal
 from src.analysis_context_pack_overview import (
@@ -69,12 +75,14 @@ from src.storage import (
     AlertTriggerRecord,
     DatabaseManager,
 )
+from src.config import get_config
 from src.utils.sanitize import sanitize_diagnostic_text
 
 
 LEGACY_RUNTIME_ALERT_TYPES = frozenset({"price_cross", "price_change_percent", "volume_spike"})
+OPPORTUNITY_ALERT_TYPES = frozenset({"sector_move", "news_catalyst", "opportunity_score_cross"})
 SYMBOL_ALERT_TYPES = LEGACY_RUNTIME_ALERT_TYPES | TECHNICAL_ALERT_TYPES
-SUPPORTED_ALERT_TYPES = SYMBOL_ALERT_TYPES | PORTFOLIO_ALERT_TYPES | MARKET_ALERT_TYPES
+SUPPORTED_ALERT_TYPES = SYMBOL_ALERT_TYPES | PORTFOLIO_ALERT_TYPES | MARKET_ALERT_TYPES | OPPORTUNITY_ALERT_TYPES
 SUPPORTED_TARGET_SCOPES = frozenset({"single_symbol", "watchlist", "portfolio_holdings", "portfolio_account", "market"})
 SUPPORTED_SEVERITIES = frozenset({"info", "warning", "critical"})
 NULLABLE_RULE_UPDATE_FIELDS = frozenset({"cooldown_policy", "notification_policy"})
@@ -221,6 +229,8 @@ class AlertService:
             return await asyncio.to_thread(evaluate_portfolio_risk_alert, rule)
         if isinstance(rule, MarketLightAlert):
             return await asyncio.to_thread(evaluate_market_light_alert, rule, cache=daily_cache)
+        if isinstance(rule, OpportunityAlert):
+            return await asyncio.to_thread(evaluate_opportunity_alert, rule, cache=daily_cache)
         if isinstance(rule, StaticAlertEvaluation):
             return evaluate_static_alert(rule)
         return self._evaluation_error(rule, f"unsupported runtime alert type: {rule.alert_type}")
@@ -701,6 +711,14 @@ class AlertService:
             if rule.alert_type == "market_light_score_drop":
                 return float(rule.parameters.get("min_drop", 0) or 0)
             return None
+        if isinstance(rule, OpportunityAlert):
+            if rule.alert_type == "sector_move":
+                return float(rule.parameters.get("min_score", 0) or 0)
+            if rule.alert_type == "news_catalyst":
+                return float(rule.parameters.get("min_score", 0) or 0)
+            if rule.alert_type == "opportunity_score_cross":
+                return float(rule.parameters.get("threshold", 0) or 0)
+            return None
         return None
 
     @staticmethod
@@ -715,6 +733,8 @@ class AlertService:
             return "portfolio_risk"
         if isinstance(rule, MarketLightAlert):
             return MARKET_LIGHT_DATA_SOURCE
+        if isinstance(rule, OpportunityAlert):
+            return OPPORTUNITY_ALERT_DATA_SOURCE
         return None
 
     @classmethod
@@ -879,6 +899,7 @@ class AlertService:
         alert_type = str(payload.get("alert_type") or "").strip().lower()
         if alert_type not in SUPPORTED_ALERT_TYPES:
             raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type or '<empty>'}")
+        self._validate_opportunity_alert_enabled(alert_type)
         self._validate_scope_alert_type(target_scope, alert_type)
 
         severity = str(payload.get("severity") or "warning").strip().lower()
@@ -919,11 +940,13 @@ class AlertService:
     @staticmethod
     def _validate_scope_alert_type(target_scope: str, alert_type: str) -> None:
         if target_scope == "market":
-            if alert_type not in MARKET_ALERT_TYPES:
+            if alert_type not in MARKET_ALERT_TYPES and alert_type not in OPPORTUNITY_ALERT_TYPES:
                 raise AlertServiceError("market target_scope only supports market alert types")
             return
         if alert_type in MARKET_ALERT_TYPES:
             raise AlertServiceError("market alert types require target_scope=market")
+        if alert_type in OPPORTUNITY_ALERT_TYPES:
+            raise AlertServiceError("opportunity alert types require target_scope=market")
         if target_scope == "portfolio_account":
             if alert_type not in PORTFOLIO_ALERT_TYPES:
                 raise AlertServiceError("portfolio_account only supports portfolio alert types")
@@ -932,6 +955,15 @@ class AlertService:
             raise AlertServiceError("portfolio alert types require target_scope=portfolio_account")
         if target_scope in {"single_symbol", "watchlist", "portfolio_holdings"} and alert_type not in SYMBOL_ALERT_TYPES:
             raise UnsupportedAlertTypeError(f"unsupported alert_type for {target_scope}: {alert_type}")
+
+    @staticmethod
+    def _validate_opportunity_alert_enabled(alert_type: str) -> None:
+        if alert_type not in OPPORTUNITY_ALERT_TYPES:
+            return
+        if not bool(getattr(get_config(), "opportunity_engine_enabled", False)):
+            raise UnsupportedAlertTypeError(
+                f"opportunity alert type requires OPPORTUNITY_ENGINE_ENABLED=true: {alert_type}"
+            )
 
     def _normalize_target(self, target_scope: str, target: str) -> str:
         if target_scope == "single_symbol":
@@ -989,6 +1021,38 @@ class AlertService:
             except ValueError as exc:
                 raise AlertServiceError(str(exc)) from exc
 
+        if alert_type in OPPORTUNITY_ALERT_TYPES:
+            return self._normalize_opportunity_parameters(alert_type, parameters)
+
+        raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type}")
+
+    def _normalize_opportunity_parameters(self, alert_type: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        if alert_type == "sector_move":
+            return {
+                "min_score": self._positive_float(parameters.get("min_score", 70), "min_score"),
+                "min_change_pct": self._positive_float(parameters.get("min_change_pct", 3), "min_change_pct"),
+                "cooldown_seconds": int(parameters.get("cooldown_seconds") or 7200),
+            }
+        if alert_type == "news_catalyst":
+            keywords = parameters.get("keywords") or []
+            if isinstance(keywords, str):
+                keywords = [keywords]
+            if not isinstance(keywords, list):
+                raise AlertServiceError("keywords must be a list")
+            return {
+                "min_score": self._positive_float(parameters.get("min_score", 60), "min_score"),
+                "keywords": [str(item).strip() for item in keywords if str(item).strip()][:20],
+                "cooldown_seconds": int(parameters.get("cooldown_seconds") or 14400),
+            }
+        if alert_type == "opportunity_score_cross":
+            direction = str(parameters.get("direction") or "above").strip().lower()
+            if direction not in {"above"}:
+                raise AlertServiceError(f"invalid direction: {direction}")
+            return {
+                "direction": direction,
+                "threshold": self._positive_float(parameters.get("threshold", 75), "threshold"),
+                "cooldown_seconds": int(parameters.get("cooldown_seconds") or 86400),
+            }
         raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {alert_type}")
 
     @staticmethod
@@ -1022,10 +1086,13 @@ class AlertService:
         if data["alert_type"] in MARKET_ALERT_TYPES:
             return [make_market_light_payload(parent_key=parent_key, data=data, config=config)]
 
+        if data["alert_type"] in OPPORTUNITY_ALERT_TYPES:
+            if config is None:
+                config = get_config()
+            return [make_opportunity_payload(parent_key=parent_key, data=data, config=config)]
+
         if data["target_scope"] in SYMBOL_BATCH_TARGET_SCOPES:
             if config is None:
-                from src.config import get_config
-
                 config = get_config()
             try:
                 targets, overflow_count = expand_symbol_targets(
@@ -1140,6 +1207,30 @@ class AlertService:
                 indicator_params=parameters,
                 metadata=metadata,
             )
+        if data["alert_type"] in MARKET_ALERT_TYPES:
+            rule = make_market_light_payload(
+                parent_key=self._semantic_key(
+                    data["target_scope"],
+                    data["target"],
+                    data["alert_type"],
+                    parameters,
+                ),
+                data=data,
+            ).rule
+            rule.metadata.update(metadata)
+            return rule
+        if data["alert_type"] in OPPORTUNITY_ALERT_TYPES:
+            rule = make_opportunity_payload(
+                parent_key=self._semantic_key(
+                    data["target_scope"],
+                    data["target"],
+                    data["alert_type"],
+                    parameters,
+                ),
+                data=data,
+            ).rule
+            rule.metadata.update(metadata)
+            return rule
         raise UnsupportedAlertTypeError(f"unsupported alert_type for Alert API: {data['alert_type']}")
 
     @staticmethod
@@ -1306,6 +1397,12 @@ class AlertService:
             return f"{target} market light status {statuses}"
         if alert_type == "market_light_score_drop":
             return f"{target} market light score drop {parameters['min_drop']}"
+        if alert_type == "sector_move":
+            return f"{target} sector move score {parameters['min_score']}"
+        if alert_type == "news_catalyst":
+            return f"{target} news catalyst score {parameters['min_score']}"
+        if alert_type == "opportunity_score_cross":
+            return f"{target} opportunity score {parameters['direction']} {parameters['threshold']}"
         return f"{target} {alert_type}"
 
     @staticmethod

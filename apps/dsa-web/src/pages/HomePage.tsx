@@ -41,6 +41,18 @@ type StockAnalysisNavigationState = {
   selectionSource?: string;
 };
 
+const QUICK_ANALYSIS_SUGGESTIONS: Array<{
+  label: string;
+  stockCode: string;
+  stockName?: string;
+  selectionSource?: 'manual' | 'autocomplete' | 'import' | 'image';
+}> = [
+  { label: '贵州茅台', stockCode: '600519', stockName: '贵州茅台', selectionSource: 'manual' },
+  { label: '腾讯控股', stockCode: '00700.HK', stockName: '腾讯控股', selectionSource: 'manual' },
+  { label: 'Apple', stockCode: 'AAPL', stockName: 'Apple', selectionSource: 'manual' },
+  { label: '沪深300ETF', stockCode: '510300', stockName: '沪深300ETF', selectionSource: 'manual' },
+];
+
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -388,6 +400,20 @@ const HomePage: React.FC = () => {
     [query, selectedAnalysisSkills, submitAnalysis],
   );
 
+  const handleQuickSubmit = useCallback(
+    (stockCode: string, stockName?: string, selectionSource?: 'manual' | 'autocomplete' | 'import' | 'image') => {
+      setQuery(stockCode);
+      void submitAnalysis({
+        stockCode,
+        stockName,
+        originalQuery: stockName || stockCode,
+        selectionSource: selectionSource ?? 'manual',
+        skills: selectedAnalysisSkills,
+      });
+    },
+    [selectedAnalysisSkills, setQuery, submitAnalysis],
+  );
+
   useEffect(() => {
     const state = location.state as StockAnalysisNavigationState | null;
     const stockCode = typeof state?.stockCode === 'string' ? state.stockCode.trim() : '';
@@ -682,6 +708,19 @@ const HomePage: React.FC = () => {
                   disabled={isAnalyzing}
                   className={inputError ? 'border-danger/50' : undefined}
                 />
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {QUICK_ANALYSIS_SUGGESTIONS.map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      disabled={isAnalyzing}
+                      className="rounded-full border border-subtle bg-surface/70 px-3 py-1 text-xs text-secondary-text transition-colors hover:border-cyan/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                      onClick={() => handleQuickSubmit(item.stockCode, item.stockName, item.selectionSource)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               {analysisSkills.length > 0 ? (
                 <div ref={strategyMenuRef} className="relative flex-shrink-0">

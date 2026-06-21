@@ -16,6 +16,8 @@ export interface SearchOptions {
   limit?: number;
   /** Show only active stocks */
   activeOnly?: boolean;
+  /** Restrict by asset type */
+  assetTypes?: Array<StockIndexItem['assetType']>;
 }
 
 /**
@@ -37,10 +39,12 @@ export function searchStocks(
   }
   const limit = options.limit || SEARCH_CONFIG.DEFAULT_LIMIT;
   const activeOnly = options.activeOnly !== false;
+  const assetTypes = options.assetTypes;
 
   // Filter index
   const filteredIndex = index.filter(item => {
     if (activeOnly && !item.active) return false;
+    if (assetTypes && assetTypes.length > 0 && !assetTypes.includes(item.assetType)) return false;
     return true;
   });
 
@@ -65,6 +69,7 @@ export function searchStocks(
     displayCode: s.item.displayCode,
     nameZh: s.item.nameZh,
     market: s.item.market,
+    assetType: s.item.assetType,
     matchType: determineMatchType(s.score),
     matchField: determineMatchField(normalizedQuery, s.item),
     score: s.score,

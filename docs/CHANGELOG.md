@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] AlphaSift `/screening` 页面机会摘要改为手动触发的异步刷新，并持久化展示最近一次成功结果与待恢复任务。
+- [改进] 机会引擎与 AlphaSift 热点详情支持同花顺快讯分类催化信号；当 THS 返回里可解析出 `tagId` 时，会补充 `ths_flashnews` 事件与 `key_news`，否则继续沿用现有摘要事件回退。
+- [改进] AlphaSift 选股完成后写入本地历史，并在 Web 选股页支持刷新后查看和恢复最近结果。
+
+- [改进] 启动 `ai-pan` 单仓吸收：机会概览新增 `news_status`、`market_outlook`、`evidence_summary`、`review_snapshot`，并在 `/screening`、`/portfolio` 首轮落地 ai-pan 风格证据与复盘摘要。
+- [改进] 机会概览证据摘要补齐主线 / 前排 / 板块胜率解释，`review_snapshot` 可优先汇总已有板块 `review_hit_rate` 与样本数信号。
+- [改进] 机会概览的 `review_snapshot` 新增已落盘 `market_review` history 读取链路，可优先复用历史复盘样本；历史缺失时继续回退当前板块 `review_hit_rate` / `review_attempts` 聚合。
+- [改进] `market_review` history 落盘时会同步补齐标准化 `opportunity_review` 块，统一沉淀 `summary/rows/source`，减少后续 `/opportunities/overview` 与页面侧重复拼装。
+- [改进] 机会概览的 `market_outlook` 新增轻量 `reasoning` 说明，并在 `/screening`、`/portfolio` 统一展示当前主线与前排候选的判断依据。
+- [改进] `market_review` 写入侧会把历史复盘聚合出的真实板块命中率 / 样本数回填到本次 `sectors.top`，即使旧快照缺少直接复盘行，后续读侧仍可统一复用沉淀结果。
+- [改进] 机会概览的 `market_outlook.reasoning` 会优先吸收最近 `market_review` history 的上涨/下跌家数与宽度上下文，让当前主线判断带上 ai-pan 风格的大盘宽度解释。
+- [改进] `/screening` 机会摘要新增个股/ETF 偏好切换、稳健/平衡/激进风险模式与单笔风险限制提示，后端机会概览同步支持 `risk_profile` 差异化仓位建议。
+- [改进] 持仓页补齐“持仓关联机会”与“关联板块风险与机会”提示，支持按当前账户范围反查机会，并把命中的板块机会与行业集中度合并展示。
+- [改进] 机会引擎新增 THS 外部信息源适配层，正式补充同花顺行业/概念摘要、驱动事件与个股异动榜单信号，并通过独立 timeout / warning 保持 overview 与 scan 的安全降级。
+- [文档] 新增 `docs/investment-capability-gap-analysis.md`，收口个人投资助手方向的成熟产品/研究 workflow 对标、能力缺口和长期保留边界。
+- [改进] `.claude/skills/` 新增板块机会、ETF 选择、新闻催化、盘中异动、新手解释、组合辅助等 6 个仓库级专用 skill，复用现有机会引擎与工作台能力。
+
+- [修复] AlphaSift 热点题材刷新在 EastMoney 瞬断且无缓存时返回友好空态，并让桌面更新保留 AlphaSift 热点缓存。
+- [修复] 问股从历史报告进入后的追问会持续携带当前标的，切回或重载已有会话时可从历史消息恢复基础当前标的，并由后端阻断未明确切换时的错误股票工具调用、交易所片段和指标缩写误路由。
+- [修复] 自选股加入和删除按等价股票代码匹配港股及大小写美股变体，避免 `00700`、`HK00700`、`00700.HK` 或 `aapl`、`AAPL` 被误判为不同标的。
+- [改进] #1390 P0 为个股分析与历史/回测展示新增可选八态 `action` / `action_label` 建议动作字段，保留 `operation_advice` 自由文本和 `decision_type=buy|hold|sell` 统计口径，不新增迁移或配置项。
+- [新功能] #1390 P1 新增独立 `DecisionSignal` 存储、Repository、Service 与 `/api/v1/decision-signals` API，支持按来源类型/市场/股票/动作/期限/阶段去重、按 `source_report_id` / `trace_id` 查询、同源过期信号续期且保留来源身份字段、禁止 expired 直接 PATCH 复活、价格计划校验、状态更新、懒过期、cache-only 持仓过滤、敏感信息脱敏、敏感 `trace_id` 拒绝和仅清理 `source_type=analysis` 历史绑定信号的历史删除联动。
+- [改进] #1390 P1 补充 Web decision-signals typed API wrapper 与契约隔离测试，暂不接入 UI。
+- [改进] #1390 P3 为 `DecisionSignal` 补齐默认生命周期、同源窄 relaxed 去重、相反 active 信号自动 invalidated、terminal 状态不可 PATCH 复活和自动提取低敏 market phase hints，保持 API 响应 schema 不变。
+- [修复] #1390 收紧建议动作 legacy fallback：英文 `not to ...` 与 `avoid selling/reducing/trimming ...` 等否定/回避表达不再误判为买卖动作，Web 旧记录不再把中文金融上下文、`buy or sell`、多 guard 歧义文本或 `buyback` / `buy-back` / `buy back` / `selloff` / `sell-off` / `sell off` 等英文复合词渲染成 action badge，并在有结构化 `action` 时让回测/历史趋势等入口按界面语言显示 action 标签。
+- [改进] 完善运行时日志上下文，补充 logger name、触发来源、市场统计与实时行情预取链路状态，便于排查调度、API、Bot 和数据源降级路径。
+- [新功能] 新增分析任务与历史报告运行流快照 API，提供 lanes、nodes、edges、events、summary 等统一契约，并从任务队列、运行诊断和 AnalysisContextPack overview 构建脱敏数据流/信息流。
+- [新功能] Web 端为活跃任务、历史报告和大盘复盘报告补充运行流视图入口，支持查看运行摘要、拓扑节点、事件流和基础排障详情。
+- [修复] 修复历史报告运行流快照在混合时区事件时间戳下返回 500 的问题。
+- [改进] #1459 持仓管理页新增持仓账户删除入口，复用现有账户软删除接口，误建账户会从默认列表、快照、风险、录入入口和事件列表隐藏且不物理清理历史流水。
+- [修复] 修复运行流 live SSE 事件未复用快照层递归脱敏规则的问题，避免本地路径、prompt/raw response、代理头等敏感诊断字段在 refetch 前短暂暴露。
+- [修复] 修复 Web 首页分析任务卡片在窄侧栏下挤压股票信息、进度和运行诊断文案的问题。
+- [修复] 隔离个股分析自动生成的大盘上下文运行诊断，避免大盘复盘与个股报告共用 query_id 导致运行流重复展示“保存报告”和“推送通知”，并兼容通知跳过时 `attempts=0` 的运行流快照。
+- [改进] 运行流 active task 增加 provider 与 LLM started 实时事件，长耗时步骤开始时先显示 running 卡片，完成后复用同一节点更新结果，避免重复卡片。
+- [修复] 运行流为筹码分布补齐 provider started/result 事件，个股分析触发筹码数据源调用时可显示“筹码结构”运行卡片并记录降级尝试。
+- [修复] 修复个股运行流活跃任务后期 LLM/通知卡片临时重复、数据源聚合卡片过早显示成功，并为个股所属板块补齐运行流卡片。
+- [新功能] #1649 新增 Token 用量监控看板与 `/api/v1/usage/dashboard` 接口，展示 LLM 调用总量、Prompt/Completion 拆分、模型用量、调用类型分布和最近调用明细。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 
@@ -899,19 +936,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### 新功能
 
 - 💼 **持仓管理 P0 全功能上线**（#677，对应 Issue #627）
-  - **核心账本与快照闭环**：新增账户、交易、现金流水、企业行为、持仓缓存、每日快照等核心数据模型与 API 端点；支持 FIFO / AVG 双成本法回放；同日事件顺序固定为 `现金 → 企业行为 → 交易`；持仓快照写入采用原子事务。
-  - **券商 CSV 导入**：支持华泰 / 中信 / 招商首批适配，含列名别名兼容；两阶段接口（解析预览 + 确认提交）；`trade_uid` 优先、key-field hash 兜底的幂等去重；前导零股票代码完整保留。
-  - **组合风险报告**：集中度风险（Top Positions + A 股板块口径）、历史回撤监控（支持回填缺失快照）、止损接近预警；多币种统一换算 CNY 口径；汲取失败时回退最近成功汇率并标记 stale。
-  - **Web 持仓页**（`/portfolio`）：组合总览、持仓明细、集中度饼图、风险摘要、全组合 / 单账户切换；手工录入交易 / 资金流水 / 企业行为；内嵌账户创建入口；CSV 解析 + 提交闭环与券商选择器。
-  - **Agent 持仓工具**：新增 `get_portfolio_snapshot` 数据工具，默认紧凑摘要，可选持仓明细与风险数据。
-  - **事件查询 API**：新增 `GET /portfolio/trades`、`GET /portfolio/cash-ledger`、`GET /portfolio/corporate-actions`，支持日期过滤与分页。
-  - **可扩展 Parser Registry**：应用级共享注册，支持运行时注册新券商；新增 `GET /portfolio/imports/csv/brokers` 发现接口。
+    - **核心账本与快照闭环**：新增账户、交易、现金流水、企业行为、持仓缓存、每日快照等核心数据模型与 API 端点；支持 FIFO / AVG 双成本法回放；同日事件顺序固定为 `现金 → 企业行为 → 交易`；持仓快照写入采用原子事务。
+    - **券商 CSV 导入**：支持华泰 / 中信 / 招商首批适配，含列名别名兼容；两阶段接口（解析预览 + 确认提交）；`trade_uid` 优先、key-field hash 兜底的幂等去重；前导零股票代码完整保留。
+    - **组合风险报告**：集中度风险（Top Positions + A 股板块口径）、历史回撤监控（支持回填缺失快照）、止损接近预警；多币种统一换算 CNY 口径；汲取失败时回退最近成功汇率并标记 stale。
+    - **Web 持仓页**（`/portfolio`）：组合总览、持仓明细、集中度饼图、风险摘要、全组合 / 单账户切换；手工录入交易 / 资金流水 / 企业行为；内嵌账户创建入口；CSV 解析 + 提交闭环与券商选择器。
+    - **Agent 持仓工具**：新增 `get_portfolio_snapshot` 数据工具，默认紧凑摘要，可选持仓明细与风险数据。
+    - **事件查询 API**：新增 `GET /portfolio/trades`、`GET /portfolio/cash-ledger`、`GET /portfolio/corporate-actions`，支持日期过滤与分页。
+    - **可扩展 Parser Registry**：应用级共享注册，支持运行时注册新券商；新增 `GET /portfolio/imports/csv/brokers` 发现接口。
 
 - 🎨 **前端设计系统与原子组件库**（#662）
-  - 引入渐进式双主题架构（HSL 变量化设计令牌），清理历史 Legacy CSS；重构 Button / Card / Badge / Collapsible / Input / Select 等 20+ 核心组件；新增 `clsx` + `tailwind-merge` 类名合并工具；提升历史记录、LLM 配置等页面可读性。
+    - 引入渐进式双主题架构（HSL 变量化设计令牌），清理历史 Legacy CSS；重构 Button / Card / Badge / Collapsible / Input / Select 等 20+ 核心组件；新增 `clsx` + `tailwind-merge` 类名合并工具；提升历史记录、LLM 配置等页面可读性。
 
 - ⚡ **分析 API 异步契约与启动优化**（#656）
-  - 规范 `POST /api/v1/analysis/analyze` 异步请求的返回契约；优化服务启动辅助逻辑；修复前端报告类型联合定义与后端响应对齐问题。
+    - 规范 `POST /api/v1/analysis/analyze` 异步请求的返回契约；优化服务启动辅助逻辑；修复前端报告类型联合定义与后端响应对齐问题。
 
 ### 修复
 
@@ -1135,10 +1172,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - 📡 **LiteLLM Direct Integration + Multi API Key Support** (#454, Fixes #421 #428)
-  - Removed native SDKs (google-generativeai, google-genai, anthropic); unified through `litellm>=1.80.10`
-  - New config: `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `GEMINI_API_KEYS`, `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`
-  - Multi-key auto-builds LiteLLM Router (simple-shuffle) with 429 cooldown
-  - **Breaking**: `.env` `GEMINI_MODEL` (no prefix) only for fallback; explicit config must include provider prefix
+    - Removed native SDKs (google-generativeai, google-genai, anthropic); unified through `litellm>=1.80.10`
+    - New config: `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `GEMINI_API_KEYS`, `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`
+    - Multi-key auto-builds LiteLLM Router (simple-shuffle) with 429 cooldown
+    - **Breaking**: `.env` `GEMINI_MODEL` (no prefix) only for fallback; explicit config must include provider prefix
 
 ### Changed
 - ♻️ **Notification Refactoring** (#435) — extracted 10 sender classes into `src/notification_sender/`
@@ -1194,9 +1231,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 修复（#patch）
 - 🐛 **StockTrendAnalyzer 从未执行** (Issue #357)
-  - 根因：`get_analysis_context` 仅返回 2 天数据且无 `raw_data`，pipeline 中 `raw_data in context` 始终为 False
-  - 修复：Step 3 直接调用 `get_data_range` 获取 90 日历天（约 60 交易日）历史数据用于趋势分析
-  - 改善：趋势分析失败时用 `logger.warning(..., exc_info=True)` 记录完整 traceback
+    - 根因：`get_analysis_context` 仅返回 2 天数据且无 `raw_data`，pipeline 中 `raw_data in context` 始终为 False
+    - 修复：Step 3 直接调用 `get_data_range` 获取 90 日历天（约 60 交易日）历史数据用于趋势分析
+    - 改善：趋势分析失败时用 `logger.warning(..., exc_info=True)` 记录完整 traceback
 
 ## [3.2.10] - 2026-02-22
 
@@ -1211,162 +1248,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 修复
 - 🐛 **ETF 分析仅关注指数走势**（Issue #274）
-  - 美股/港股 ETF（如 VOO、QQQ）与 A 股 ETF 不再纳入基金公司层面风险（诉讼、声誉等）
-  - 搜索维度：ETF/指数专用 risk_check、earnings、industry 查询，避免命中基金管理人新闻
-  - AI 提示：指数型标的分析约束，`risk_alerts` 不得出现基金管理人公司经营风险
+    - 美股/港股 ETF（如 VOO、QQQ）与 A 股 ETF 不再纳入基金公司层面风险（诉讼、声誉等）
+    - 搜索维度：ETF/指数专用 risk_check、earnings、industry 查询，避免命中基金管理人新闻
+    - AI 提示：指数型标的分析约束，`risk_alerts` 不得出现基金管理人公司经营风险
 
 ## [3.2.8] - 2026-02-21
 
 ### 修复
 - 🐛 **BOT 与 WEB UI 股票代码大小写统一**（Issue #355）
-  - BOT `/analyze` 与 WEB UI 触发分析的股票代码统一为大写（如 `aapl` → `AAPL`）
-  - 新增 `canonical_stock_code()`，在 BOT、API、Config、CLI、task_queue 入口处规范化
-  - 历史记录与任务去重逻辑可正确识别同一股票（大小写不再影响）
+    - BOT `/analyze` 与 WEB UI 触发分析的股票代码统一为大写（如 `aapl` → `AAPL`）
+    - 新增 `canonical_stock_code()`，在 BOT、API、Config、CLI、task_queue 入口处规范化
+    - 历史记录与任务去重逻辑可正确识别同一股票（大小写不再影响）
 
 ## [3.2.7] - 2026-02-20
 
 ### 新增
 - 🔐 **Web 页面密码验证**（Issue #320, #349）
-  - 支持 `ADMIN_AUTH_ENABLED=true` 启用 Web 登录保护
-  - 首次访问在网页设置初始密码；支持「系统设置 > 修改密码」和 CLI `python -m src.auth reset_password` 重置
+    - 支持 `ADMIN_AUTH_ENABLED=true` 启用 Web 登录保护
+    - 首次访问在网页设置初始密码；支持「系统设置 > 修改密码」和 CLI `python -m src.auth reset_password` 重置
 
 ## [3.2.6] - 2026-02-20
 ### ⚠️ 破坏性变更（Breaking Changes）
 
 - **历史记录 API 变更 (Issue #322)**
-  - 路由变更：`GET /api/v1/history/{query_id}` → `GET /api/v1/history/{record_id}`
-  - 参数变更：`query_id` (字符串) → `record_id` (整数)
-  - 新闻接口变更：`GET /api/v1/history/{query_id}/news` → `GET /api/v1/history/{record_id}/news`
-  - 原因：`query_id` 在批量分析时可能重复，无法唯一标识单条历史记录。改用数据库主键 `id` 确保唯一性
-  - 影响范围：使用旧版历史详情 API 的所有客户端需同步更新
+    - 路由变更：`GET /api/v1/history/{query_id}` → `GET /api/v1/history/{record_id}`
+    - 参数变更：`query_id` (字符串) → `record_id` (整数)
+    - 新闻接口变更：`GET /api/v1/history/{query_id}/news` → `GET /api/v1/history/{record_id}/news`
+    - 原因：`query_id` 在批量分析时可能重复，无法唯一标识单条历史记录。改用数据库主键 `id` 确保唯一性
+    - 影响范围：使用旧版历史详情 API 的所有客户端需同步更新
 
 ### 修复
 - 修复美股（如 ADBE）技术指标矛盾：akshare 美股复权数据异常，统一美股历史数据源为 YFinance（Issue #311）
 - 🐛 **历史记录查询和显示问题 (Issue #322)**
-  - 修复历史记录列表查询中日期不一致问题：使用明天作为 endDate，确保包含今天全天的数据
-  - 修复服务器 UI 报告选择问题：原因是多条记录共享同一 `query_id`，导致总是显示第一条。现改用 `analysis_history.id` 作为唯一标识
-  - 历史详情、新闻接口及前端组件已全面适配 `record_id`
-  - 新增后台轮询（每 30s）与页面可见性变更时静默刷新历史列表，确保 CLI 发起的分析完成后前端能及时同步，使用 `silent` 模式避免触发 loading 状态
+    - 修复历史记录列表查询中日期不一致问题：使用明天作为 endDate，确保包含今天全天的数据
+    - 修复服务器 UI 报告选择问题：原因是多条记录共享同一 `query_id`，导致总是显示第一条。现改用 `analysis_history.id` 作为唯一标识
+    - 历史详情、新闻接口及前端组件已全面适配 `record_id`
+    - 新增后台轮询（每 30s）与页面可见性变更时静默刷新历史列表，确保 CLI 发起的分析完成后前端能及时同步，使用 `silent` 模式避免触发 loading 状态
 - 🐛 **美股指数实时行情与日线数据** (Issue #273)
-  - 修复 SPX、DJI、IXIC、NDX、VIX、RUT 等美股指数无法获取实时行情的问题
-  - 新增 `us_index_mapping` 模块，将用户输入（如 SPX）映射为 Yahoo Finance 符号（如 ^GSPC）
-  - 美股指数与美股股票日线数据直接路由至 YfinanceFetcher，避免遍历不支持的数据源
-  - 消除重复的美股识别逻辑，统一使用 `is_us_stock_code()` 函数
+    - 修复 SPX、DJI、IXIC、NDX、VIX、RUT 等美股指数无法获取实时行情的问题
+    - 新增 `us_index_mapping` 模块，将用户输入（如 SPX）映射为 Yahoo Finance 符号（如 ^GSPC）
+    - 美股指数与美股股票日线数据直接路由至 YfinanceFetcher，避免遍历不支持的数据源
+    - 消除重复的美股识别逻辑，统一使用 `is_us_stock_code()` 函数
 
 ### 优化
 - 🎨 **首页输入栏与 Market Sentiment 布局对齐优化**
-  - 股票代码输入框左缘与历史记录 glass-card 框左对齐
-  - 分析按钮右缘与 Market Sentiment 外框右对齐
-  - Market Sentiment 卡片向下拉伸填满格子，消除与 STRATEGY POINTS 之间的空隙
-  - 窄屏时输入栏填满宽度，响应式对齐保持一致
+    - 股票代码输入框左缘与历史记录 glass-card 框左对齐
+    - 分析按钮右缘与 Market Sentiment 外框右对齐
+    - Market Sentiment 卡片向下拉伸填满格子，消除与 STRATEGY POINTS 之间的空隙
+    - 窄屏时输入栏填满宽度，响应式对齐保持一致
 
 ## [3.2.5] - 2026-02-19
 
 ### 新增
 - 🌍 **大盘复盘可选区域**（Issue #299）
-  - 支持 `MARKET_REVIEW_REGION` 环境变量：`cn`（A股）、`us`（美股）、`both`（两者）
-  - us 模式使用 SPX/纳斯达克/道指/VIX 等指数；both 模式可同时复盘 A 股与美股
-  - 默认 `cn`，保持向后兼容
+    - 支持 `MARKET_REVIEW_REGION` 环境变量：`cn`（A股）、`us`（美股）、`both`（两者）
+    - us 模式使用 SPX/纳斯达克/道指/VIX 等指数；both 模式可同时复盘 A 股与美股
+    - 默认 `cn`，保持向后兼容
 
 ## [3.2.4] - 2026-02-18
 
 ### 修复
 - 🐛 **统一美股数据源为 YFinance**（Issue #311）
-  - akshare 美股复权数据异常，统一美股历史数据源为 YFinance
-  - 修复 ADBE 等美股股票技术指标矛盾问题
+    - akshare 美股复权数据异常，统一美股历史数据源为 YFinance
+    - 修复 ADBE 等美股股票技术指标矛盾问题
 
 ## [3.2.3] - 2026-02-18
 
 ### 修复
 - 🐛 **标普500实时数据缺失**（Issue #273）
-  - 修复 SPX、DJI、IXIC、NDX、VIX、RUT 等美股指数无法获取实时行情的问题
-  - 新增 `us_index_mapping` 模块，将用户输入（如 SPX）映射为 Yahoo Finance 符号（如 `^GSPC`）
-  - 美股指数与美股股票日线数据直接路由至 YfinanceFetcher，避免遍历不支持的数据源
+    - 修复 SPX、DJI、IXIC、NDX、VIX、RUT 等美股指数无法获取实时行情的问题
+    - 新增 `us_index_mapping` 模块，将用户输入（如 SPX）映射为 Yahoo Finance 符号（如 `^GSPC`）
+    - 美股指数与美股股票日线数据直接路由至 YfinanceFetcher，避免遍历不支持的数据源
 
 ## [3.2.2] - 2026-02-16
 
 ### 新增
 - 📊 **PE 指标支持**（Issue #296）
-  - AI System Prompt 增加 PE 估值关注
+    - AI System Prompt 增加 PE 估值关注
 - 📰 **新闻时效性筛查**（Issue #296）
-  - `NEWS_MAX_AGE_DAYS`：新闻最大时效（天），默认 3，避免使用过时信息
+    - `NEWS_MAX_AGE_DAYS`：新闻最大时效（天），默认 3，避免使用过时信息
 - 📈 **强势趋势股乖离率放宽**（Issue #296）
-  - `BIAS_THRESHOLD`：乖离率阈值（%），默认 5.0，可配置
-  - 强势趋势股（多头排列且趋势强度 ≥70）自动放宽乖离率到 1.5 倍
+    - `BIAS_THRESHOLD`：乖离率阈值（%），默认 5.0，可配置
+    - 强势趋势股（多头排列且趋势强度 ≥70）自动放宽乖离率到 1.5 倍
 
 ## [3.2.1] - 2026-02-16
 
 ### 新增
 - 🔧 **东财接口补丁可配置开关**
-  - 支持 `EFINANCE_PATCH_ENABLED` 环境变量开关东财接口补丁（默认 `true`）
-  - 补丁不可用时可降级关闭，避免影响主流程
+    - 支持 `EFINANCE_PATCH_ENABLED` 环境变量开关东财接口补丁（默认 `true`）
+    - 补丁不可用时可降级关闭，避免影响主流程
 
 ## [3.2.0] - 2026-02-15
 
 ### 新增
 - 🔒 **CI 门禁统一（P0）**
-  - 新增 `scripts/ci_gate.sh` 作为后端门禁单一入口
-  - 主 CI 改为 `backend-gate`、`docker-build`、`web-gate` 三段式
-  - CI 触发改为所有 PR，避免 Required Checks 因路径过滤缺失而卡住合并
-  - `web-gate` 支持前端路径变更按需触发
-  - 新增 `network-smoke` 工作流承载非阻断网络场景回归
+    - 新增 `scripts/ci_gate.sh` 作为后端门禁单一入口
+    - 主 CI 改为 `backend-gate`、`docker-build`、`web-gate` 三段式
+    - CI 触发改为所有 PR，避免 Required Checks 因路径过滤缺失而卡住合并
+    - `web-gate` 支持前端路径变更按需触发
+    - 新增 `network-smoke` 工作流承载非阻断网络场景回归
 - 📦 **发布链路收敛（P0）**
-  - `docker-publish` 调整为 tag 主触发，并增加发布前门禁校验
-  - 手动发布增加 `release_tag` 输入与 semver/changelog 强校验
-  - 发布前新增 Docker smoke（关键模块导入）
+    - `docker-publish` 调整为 tag 主触发，并增加发布前门禁校验
+    - 手动发布增加 `release_tag` 输入与 semver/changelog 强校验
+    - 发布前新增 Docker smoke（关键模块导入）
 - 📝 **PR 模板升级（P0）**
-  - 增加背景、范围、验证命令与结果、回滚方案、Issue 关联等必填项
+    - 增加背景、范围、验证命令与结果、回滚方案、Issue 关联等必填项
 - 🤖 **AI 审查覆盖增强（P0）**
-  - `pr-review` 纳入 `.github/workflows/**` 范围
-  - 新增 `AI_REVIEW_STRICT` 开关，可选将 AI 审查失败升级为阻断
+    - `pr-review` 纳入 `.github/workflows/**` 范围
+    - 新增 `AI_REVIEW_STRICT` 开关，可选将 AI 审查失败升级为阻断
 
 ## [3.1.13] - 2026-02-15
 
 ### 新增
 - 📊 **仅分析结果摘要**（Issue #262）
-  - 支持 `REPORT_SUMMARY_ONLY` 环境变量，设为 `true` 时只推送汇总，不含个股详情
-  - 默认 `false`，多股时适合快速浏览
+    - 支持 `REPORT_SUMMARY_ONLY` 环境变量，设为 `true` 时只推送汇总，不含个股详情
+    - 默认 `false`，多股时适合快速浏览
 
 ## [3.1.12] - 2026-02-15
 
 ### 新增
 - 📧 **个股与大盘复盘合并推送**（Issue #190）
-  - 支持 `MERGE_EMAIL_NOTIFICATION` 环境变量，设为 `true` 时将个股分析与大盘复盘合并为一次推送
-  - 默认 `false`，减少邮件数量、降低被识别为垃圾邮件的风险
+    - 支持 `MERGE_EMAIL_NOTIFICATION` 环境变量，设为 `true` 时将个股分析与大盘复盘合并为一次推送
+    - 默认 `false`，减少邮件数量、降低被识别为垃圾邮件的风险
 
 ## [3.1.11] - 2026-02-15
 
 ### 新增
 - 🤖 **Anthropic Claude API 支持**（Issue #257）
-  - 支持 `ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`、`ANTHROPIC_TEMPERATURE`、`ANTHROPIC_MAX_TOKENS`
-  - AI 分析优先级：Gemini > Anthropic > OpenAI
+    - 支持 `ANTHROPIC_API_KEY`、`ANTHROPIC_MODEL`、`ANTHROPIC_TEMPERATURE`、`ANTHROPIC_MAX_TOKENS`
+    - AI 分析优先级：Gemini > Anthropic > OpenAI
 - 📷 **从图片识别股票代码**（Issue #257）
-  - 上传自选股截图，通过 Vision LLM 自动提取股票代码
-  - API: `POST /api/v1/stocks/extract-from-image`；支持 JPEG/PNG/WebP/GIF，最大 5MB
-  - 支持 `OPENAI_VISION_MODEL` 单独配置图片识别模型
+    - 上传自选股截图，通过 Vision LLM 自动提取股票代码
+    - API: `POST /api/v1/stocks/extract-from-image`；支持 JPEG/PNG/WebP/GIF，最大 5MB
+    - 支持 `OPENAI_VISION_MODEL` 单独配置图片识别模型
 - ⚙️ **通达信数据源手动配置**（Issue #257）
-  - 支持 `PYTDX_HOST`、`PYTDX_PORT` 或 `PYTDX_SERVERS` 配置自建通达信服务器
+    - 支持 `PYTDX_HOST`、`PYTDX_PORT` 或 `PYTDX_SERVERS` 配置自建通达信服务器
 
 ## [3.1.10] - 2026-02-15
 
 ### 新增
 - ⚙️ **立即运行配置**（Issue #332）
-  - 支持 `RUN_IMMEDIATELY` 环境变量，`true` 时定时任务启动后立即执行一次
+    - 支持 `RUN_IMMEDIATELY` 环境变量，`true` 时定时任务启动后立即执行一次
 - 🐛 修复 Docker 构建问题
 
 ## [3.1.9] - 2026-02-14
 
 ### 新增
 - 🔌 **东财接口补丁机制**
-  - 新增 `patch/eastmoney_patch.py` 修复 efinance 上游接口变更
-  - 不影响其他数据源的正常运行
+    - 新增 `patch/eastmoney_patch.py` 修复 efinance 上游接口变更
+    - 不影响其他数据源的正常运行
 
 ## [3.1.8] - 2026-02-14
 
 ### 新增
 - 🔐 **Webhook 证书校验开关**（Issue #265）
-  - 支持 `WEBHOOK_VERIFY_SSL` 环境变量，可关闭 HTTPS 证书校验以支持自签名证书
-  - 默认保持校验，关闭存在 MITM 风险，仅建议在可信内网使用
+    - 支持 `WEBHOOK_VERIFY_SSL` 环境变量，可关闭 HTTPS 证书校验以支持自签名证书
+    - 默认保持校验，关闭存在 MITM 风险，仅建议在可信内网使用
 
 ## [3.1.7] - 2026-02-14
 
@@ -1382,16 +1419,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 📷 **Markdown 转图片通知**（Issue #289）
-  - 支持 `MARKDOWN_TO_IMAGE_CHANNELS` 配置，对 Telegram、企业微信、自定义 Webhook（Discord）、邮件发送图片格式报告
-  - 邮件为内联附件，增强对不支持 HTML 客户端的兼容性
-  - 需安装 `wkhtmltopdf` 和 `imgkit`
+    - 支持 `MARKDOWN_TO_IMAGE_CHANNELS` 配置，对 Telegram、企业微信、自定义 Webhook（Discord）、邮件发送图片格式报告
+    - 邮件为内联附件，增强对不支持 HTML 客户端的兼容性
+    - 需安装 `wkhtmltopdf` 和 `imgkit`
 
 ## [3.1.4] - 2026-02-12
 
 ### 新增
 - 📧 **股票分组发往不同邮箱**（Issue #268）
-  - 支持 `STOCK_GROUP_N` + `EMAIL_GROUP_N` 配置，不同股票组报告发送到对应邮箱
-  - 大盘复盘发往所有配置的邮箱
+    - 支持 `STOCK_GROUP_N` + `EMAIL_GROUP_N` 配置，不同股票组报告发送到对应邮箱
+    - 大盘复盘发往所有配置的邮箱
 
 ## [3.1.3] - 2026-02-12
 
@@ -1412,8 +1449,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 📊 **ETF 支持增强与代码规范化**
-  - 统一各数据源 ETF 代码处理逻辑
-  - 新增 `canonical_stock_code()` 统一代码格式，确保数据源路由正确
+    - 统一各数据源 ETF 代码处理逻辑
+    - 新增 `canonical_stock_code()` 统一代码格式，确保数据源路由正确
 
 ## [3.0.5] - 2026-02-08
 
@@ -1437,8 +1474,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 📈 **回测引擎** (PR #269)
-  - 新增基于历史分析记录的回测系统，支持收益率、胜率、最大回撤等指标评估
-  - WebUI 集成回测结果展示
+    - 新增基于历史分析记录的回测系统，支持收益率、胜率、最大回撤等指标评估
+    - WebUI 集成回测结果展示
 
 ## [3.0.3] - 2026-02-07
 
@@ -1461,26 +1498,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 移除
 - 🗑️ **移除旧版 WebUI**
-  - 删除基于 `http.server.ThreadingHTTPServer` 的旧版 WebUI（`web/` 包）
-  - 旧版 WebUI 的功能已完全被 FastAPI（`api/`）+ React 前端替代
-  - `--webui` / `--webui-only` 命令行参数标记为弃用，自动重定向到 `--serve` / `--serve-only`
-  - `WEBUI_ENABLED` / `WEBUI_HOST` / `WEBUI_PORT` 环境变量保持兼容，自动转发到 FastAPI 服务
-  - `webui.py` 保留为兼容入口，启动时直接调用 FastAPI 后端
-  - Docker Compose 中移除 `webui` 服务定义，统一使用 `server` 服务
+    - 删除基于 `http.server.ThreadingHTTPServer` 的旧版 WebUI（`web/` 包）
+    - 旧版 WebUI 的功能已完全被 FastAPI（`api/`）+ React 前端替代
+    - `--webui` / `--webui-only` 命令行参数标记为弃用，自动重定向到 `--serve` / `--serve-only`
+    - `WEBUI_ENABLED` / `WEBUI_HOST` / `WEBUI_PORT` 环境变量保持兼容，自动转发到 FastAPI 服务
+    - `webui.py` 保留为兼容入口，启动时直接调用 FastAPI 后端
+    - Docker Compose 中移除 `webui` 服务定义，统一使用 `server` 服务
 
 ### 变更
 - ♻️ **服务层重构**
-  - 将 `web/services.py` 中的异步任务服务迁移至 `src/services/task_service.py`
-  - Bot 分析命令（`bot/commands/analyze.py`）改为使用 `src.services.task_service`
-  - Docker 环境变量 `WEBUI_HOST`/`WEBUI_PORT` 更名为 `API_HOST`/`API_PORT`（旧名仍兼容）
+    - 将 `web/services.py` 中的异步任务服务迁移至 `src/services/task_service.py`
+    - Bot 分析命令（`bot/commands/analyze.py`）改为使用 `src.services.task_service`
+    - Docker 环境变量 `WEBUI_HOST`/`WEBUI_PORT` 更名为 `API_HOST`/`API_PORT`（旧名仍兼容）
 
 ## [2.3.0] - 2026-02-01
 
 ### 新增
 - 🇺🇸 **增强美股支持** (Issue #153)
-  - 实现基于 Akshare 的美股历史数据获取 (`ak.stock_us_daily()`)
-  - 实现基于 Yfinance 的美股实时行情获取（优先策略）
-  - 增加对不支持数据源（Tushare/Baostock/Pytdx/Efinance）的美股代码过滤和快速降级
+    - 实现基于 Akshare 的美股历史数据获取 (`ak.stock_us_daily()`)
+    - 实现基于 Yfinance 的美股实时行情获取（优先策略）
+    - 增加对不支持数据源（Tushare/Baostock/Pytdx/Efinance）的美股代码过滤和快速降级
 
 ### 修复
 - 🐛 修复 AMD 等美股代码被误识别为 A 股的问题 (Issue #153)
@@ -1489,16 +1526,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 🤖 **AstrBot 消息推送** (PR #217)
-  - 新增 AstrBot 通知渠道，支持推送到 QQ 和微信
-  - 支持 HMAC SHA256 签名验证，确保通信安全
-  - 通过 `ASTRBOT_URL` 和 `ASTRBOT_TOKEN` 配置
+    - 新增 AstrBot 通知渠道，支持推送到 QQ 和微信
+    - 支持 HMAC SHA256 签名验证，确保通信安全
+    - 通过 `ASTRBOT_URL` 和 `ASTRBOT_TOKEN` 配置
 
 ## [2.2.4] - 2026-02-01
 
 ### 新增
 - ⚙️ **可配置数据源优先级** (PR #215)
-  - 支持通过环境变量（如 `YFINANCE_PRIORITY=0`）动态调整数据源优先级
-  - 无需修改代码即可优先使用特定数据源（如 Yahoo Finance）
+    - 支持通过环境变量（如 `YFINANCE_PRIORITY=0`）动态调整数据源优先级
+    - 无需修改代码即可优先使用特定数据源（如 Yahoo Finance）
 
 ## [2.2.3] - 2026-01-31
 
@@ -1514,14 +1551,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 修复
 - 🐛 **YFinance 兼容性修复** (PR #210, fixes #209)
-  - 修复新版 yfinance 返回 MultiIndex 列名导致的数据解析错误
+    - 修复新版 yfinance 返回 MultiIndex 列名导致的数据解析错误
 
 ## [2.2.0] - 2026-01-31
 
 ### 新增
 - 🔄 **多源回退策略增强**
-  - 实现了更健壮的数据获取回退机制 (feat: multi-source fallback strategy)
-  - 优化了数据源故障时的自动切换逻辑
+    - 实现了更健壮的数据获取回退机制 (feat: multi-source fallback strategy)
+    - 优化了数据源故障时的自动切换逻辑
 
 ### 修复
 - 🐛 修复 analyzer 运行后无法通过改 .env 文件的 stock_list 内容调整跟踪的股票
@@ -1535,8 +1572,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 修复
 - 🐛 **Tushare 优先级与实时行情** (Fixed #185)
-  - 修复 Tushare 数据源优先级设置问题
-  - 修复 Tushare 实时行情获取功能
+    - 修复 Tushare 数据源优先级设置问题
+    - 修复 Tushare 实时行情获取功能
 
 ## [2.1.12] - 2026-01-30
 
@@ -1548,8 +1585,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 优化
 - 🚀 **飞书消息流优化** (PR #192)
-  - 优化飞书 Stream 模式的消息类型处理
-  - 修改 Stream 消息模式默认为关闭，防止配置错误运行时报错
+    - 优化飞书 Stream 模式的消息类型处理
+    - 修改 Stream 消息模式默认为关闭，防止配置错误运行时报错
 
 ## [2.1.10] - 2026-01-30
 
@@ -1560,8 +1597,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 💬 **微信文本消息支持** (PR #137)
-  - 新增微信推送的纯文本消息类型支持
-  - 添加 `WECHAT_MSG_TYPE` 配置项
+    - 新增微信推送的纯文本消息类型支持
+    - 添加 `WECHAT_MSG_TYPE` 配置项
 
 ## [2.1.8] - 2026-01-30
 
@@ -1577,19 +1614,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 📡 **Pytdx 数据源 (Priority 2)**
-  - 新增通达信数据源，免费无需注册
-  - 多服务器自动切换
-  - 支持实时行情和历史数据
+    - 新增通达信数据源，免费无需注册
+    - 多服务器自动切换
+    - 支持实时行情和历史数据
 - 🏷️ **多源股票名称解析**
-  - DataFetcherManager 新增 `get_stock_name()` 方法
-  - 新增 `batch_get_stock_names()` 批量查询
-  - 自动在多数据源间回退
-  - Tushare 和 Baostock 新增股票名称/列表方法
+    - DataFetcherManager 新增 `get_stock_name()` 方法
+    - 新增 `batch_get_stock_names()` 批量查询
+    - 自动在多数据源间回退
+    - Tushare 和 Baostock 新增股票名称/列表方法
 - 🔍 **增强搜索回退**
-  - 新增 `search_stock_price_fallback()` 用于数据源全部失败时
-  - 新增搜索维度：市场分析、行业分析
-  - 最大搜索次数从 3 增加到 5
-  - 改进搜索结果格式（每维度 4 条结果）
+    - 新增 `search_stock_price_fallback()` 用于数据源全部失败时
+    - 新增搜索维度：市场分析、行业分析
+    - 最大搜索次数从 3 增加到 5
+    - 改进搜索结果格式（每维度 4 条结果）
 
 ### 改进
 - 更新搜索查询模板以提高相关性
@@ -1613,8 +1650,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 修复
 - 🐛 修复 WebUI 无法输入美股代码问题
-  - 输入框逻辑改成所有字母都转换成大写
-  - 支持 `.` 的输入（如 `BRK.B`）
+    - 输入框逻辑改成所有字母都转换成大写
+    - 支持 `.` 的输入（如 `BRK.B`）
 
 ## [2.1.2] - 2026-01-27
 
@@ -1636,64 +1673,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 🇺🇸 **美股分析支持**
-  - 支持美股代码直接输入（如 `AAPL`, `TSLA`）
-  - 使用 YFinance 作为美股数据源
+    - 支持美股代码直接输入（如 `AAPL`, `TSLA`）
+    - 使用 YFinance 作为美股数据源
 - 📈 **MACD 和 RSI 技术指标**
-  - MACD：趋势确认、金叉死叉信号（零轴上金叉⭐、金叉✅、死叉❌）
-  - RSI：超买超卖判断（超卖⭐、强势✅、超买⚠️）
-  - 指标信号纳入综合评分系统
+    - MACD：趋势确认、金叉死叉信号（零轴上金叉⭐、金叉✅、死叉❌）
+    - RSI：超买超卖判断（超卖⭐、强势✅、超买⚠️）
+    - 指标信号纳入综合评分系统
 - 🎮 **Discord 推送支持** (PR #124, #125, #144)
-  - 支持 Discord Webhook 和 Bot API 两种方式
-  - 通过 `DISCORD_WEBHOOK_URL` 或 `DISCORD_BOT_TOKEN` + `DISCORD_MAIN_CHANNEL_ID` 配置
+    - 支持 Discord Webhook 和 Bot API 两种方式
+    - 通过 `DISCORD_WEBHOOK_URL` 或 `DISCORD_BOT_TOKEN` + `DISCORD_MAIN_CHANNEL_ID` 配置
 - 🤖 **机器人命令交互**
-  - 钉钉机器人支持 `/分析 股票代码` 命令触发分析
-  - 支持 Stream 长连接模式
+    - 钉钉机器人支持 `/分析 股票代码` 命令触发分析
+    - 支持 Stream 长连接模式
 - 🌡️ **AI 温度参数可配置** (PR #142)
-  - 支持自定义 AI 模型温度参数
+    - 支持自定义 AI 模型温度参数
 - 🐳 **Zeabur 部署支持**
-  - 添加 Zeabur 镜像部署工作流
-  - 支持 commit hash 和 latest 双标签
+    - 添加 Zeabur 镜像部署工作流
+    - 支持 commit hash 和 latest 双标签
 
 ### 重构
 - 🏗️ **项目结构优化**
-  - 核心代码移至 `src/` 目录，根目录更清爽
-  - 文档移至 `docs/` 目录
-  - Docker 配置移至 `docker/` 目录
-  - 修复所有 import 路径，保持向后兼容
+    - 核心代码移至 `src/` 目录，根目录更清爽
+    - 文档移至 `docs/` 目录
+    - Docker 配置移至 `docker/` 目录
+    - 修复所有 import 路径，保持向后兼容
 - 🔄 **数据源架构升级**
-  - 新增数据源熔断机制，单数据源连续失败自动切换
-  - 实时行情缓存优化，批量预取减少 API 调用
-  - 网络代理智能分流，国内接口自动直连
+    - 新增数据源熔断机制，单数据源连续失败自动切换
+    - 实时行情缓存优化，批量预取减少 API 调用
+    - 网络代理智能分流，国内接口自动直连
 - 🤖 Discord 机器人重构为平台适配器架构
 
 ### 修复
 - 🌐 **网络稳定性增强**
-  - 自动检测代理配置，对国内行情接口强制直连
-  - 修复 EfinanceFetcher 偶发的 `ProtocolError`
-  - 增加对底层网络错误的捕获和重试机制
+    - 自动检测代理配置，对国内行情接口强制直连
+    - 修复 EfinanceFetcher 偶发的 `ProtocolError`
+    - 增加对底层网络错误的捕获和重试机制
 - 📧 **邮件渲染优化**
-  - 修复邮件中表格不渲染问题 (#134)
-  - 优化邮件排版，更紧凑美观
+    - 修复邮件中表格不渲染问题 (#134)
+    - 优化邮件排版，更紧凑美观
 - 📢 **企业微信推送修复**
-  - 修复大盘复盘推送不完整问题
-  - 增强消息分割逻辑，支持更多标题格式
-  - 增加分批发送间隔，避免限流丢失
+    - 修复大盘复盘推送不完整问题
+    - 增强消息分割逻辑，支持更多标题格式
+    - 增加分批发送间隔，避免限流丢失
 - 👷 **CI/CD 修复**
-  - 修复 GitHub Actions 中路径引用的错误
+    - 修复 GitHub Actions 中路径引用的错误
 
 ## [2.0.0] - 2026-01-24
 
 ### 新增
 - 🇺🇸 **美股分析支持**
-  - 支持美股代码直接输入（如 `AAPL`, `TSLA`）
-  - 使用 YFinance 作为美股数据源
+    - 支持美股代码直接输入（如 `AAPL`, `TSLA`）
+    - 使用 YFinance 作为美股数据源
 - 🤖 **机器人命令交互** (PR #113)
-  - 钉钉机器人支持 `/分析 股票代码` 命令触发分析
-  - 支持 Stream 长连接模式
-  - 支持选择精简报告或完整报告
+    - 钉钉机器人支持 `/分析 股票代码` 命令触发分析
+    - 支持 Stream 长连接模式
+    - 支持选择精简报告或完整报告
 - 🎮 **Discord 推送支持** (PR #124)
-  - 支持 Discord Webhook 推送
-  - 添加 Discord 环境变量到工作流
+    - 支持 Discord Webhook 推送
+    - 添加 Discord 环境变量到工作流
 
 ### 修复
 - 🐳 修复 WebUI 在 Docker 中绑定 0.0.0.0 (fixed #118)
@@ -1711,85 +1748,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 🖥️ WebUI 管理界面及 API 支持（PR #72）
-  - 全新 Web 架构：分层设计（Server/Router/Handler/Service）
-  - 核心 API：支持 `/analysis` (触发分析), `/tasks` (查询进度), `/health` (健康检查)
-  - 交互界面：支持页面直接输入代码并触发分析，实时展示进度
-  - 运行模式：新增 `--webui-only` 模式，仅启动 Web 服务
-  - 解决了 [#70](https://github.com/ZhuLinsen/daily_stock_analysis/issues/70) 的核心需求（提供触发分析的接口）
+    - 全新 Web 架构：分层设计（Server/Router/Handler/Service）
+    - 核心 API：支持 `/analysis` (触发分析), `/tasks` (查询进度), `/health` (健康检查)
+    - 交互界面：支持页面直接输入代码并触发分析，实时展示进度
+    - 运行模式：新增 `--webui-only` 模式，仅启动 Web 服务
+    - 解决了 [#70](https://github.com/ZhuLinsen/daily_stock_analysis/issues/70) 的核心需求（提供触发分析的接口）
 - ⚙️ GitHub Actions 配置灵活性增强（[#79](https://github.com/ZhuLinsen/daily_stock_analysis/issues/79)）
-  - 支持从 Repository Variables 读取非敏感配置（如 STOCK_LIST, GEMINI_MODEL）
-  - 保持对 Secrets 的向下兼容
+    - 支持从 Repository Variables 读取非敏感配置（如 STOCK_LIST, GEMINI_MODEL）
+    - 保持对 Secrets 的向下兼容
 
 ### 修复
 - 🐛 修复企业微信/飞书报告截断问题（[#73](https://github.com/ZhuLinsen/daily_stock_analysis/issues/73)）
-  - 移除 notification.py 中不必要的长度硬截断逻辑
-  - 依赖底层自动分片机制处理长消息
+    - 移除 notification.py 中不必要的长度硬截断逻辑
+    - 依赖底层自动分片机制处理长消息
 - 🐛 修复 GitHub Workflow 环境变量缺失（[#80](https://github.com/ZhuLinsen/daily_stock_analysis/issues/80)）
-  - 修复 `CUSTOM_WEBHOOK_BEARER_TOKEN` 未正确传递到 Runner 的问题
+    - 修复 `CUSTOM_WEBHOOK_BEARER_TOKEN` 未正确传递到 Runner 的问题
 
 ## [1.5.0] - 2026-01-17
 
 ### 新增
 - 📲 单股推送模式（[#55](https://github.com/ZhuLinsen/daily_stock_analysis/issues/55)）
-  - 每分析完一只股票立即推送，不用等全部分析完
-  - 命令行参数：`--single-notify`
-  - 环境变量：`SINGLE_STOCK_NOTIFY=true`
+    - 每分析完一只股票立即推送，不用等全部分析完
+    - 命令行参数：`--single-notify`
+    - 环境变量：`SINGLE_STOCK_NOTIFY=true`
 - 🔐 自定义 Webhook Bearer Token 认证（[#51](https://github.com/ZhuLinsen/daily_stock_analysis/issues/51)）
-  - 支持需要 Token 认证的 Webhook 端点
-  - 环境变量：`CUSTOM_WEBHOOK_BEARER_TOKEN`
+    - 支持需要 Token 认证的 Webhook 端点
+    - 环境变量：`CUSTOM_WEBHOOK_BEARER_TOKEN`
 
 ## [1.4.0] - 2026-01-17
 
 ### 新增
 - 📱 Pushover 推送支持（PR #26）
-  - 支持 iOS/Android 跨平台推送
-  - 通过 `PUSHOVER_USER_KEY` 和 `PUSHOVER_API_TOKEN` 配置
+    - 支持 iOS/Android 跨平台推送
+    - 通过 `PUSHOVER_USER_KEY` 和 `PUSHOVER_API_TOKEN` 配置
 - 🔍 博查搜索 API 集成（PR #27）
-  - 中文搜索优化，支持 AI 摘要
-  - 通过 `BOCHA_API_KEYS` 配置
+    - 中文搜索优化，支持 AI 摘要
+    - 通过 `BOCHA_API_KEYS` 配置
 - 📊 Efinance 数据源支持（PR #59）
-  - 新增 efinance 作为数据源选项
+    - 新增 efinance 作为数据源选项
 - 🇭🇰 港股支持（PR #17）
-  - 支持 5 位代码或 HK 前缀（如 `hk00700`、`hk1810`）
+    - 支持 5 位代码或 HK 前缀（如 `hk00700`、`hk1810`）
 
 ### 修复
 - 🔧 飞书 Markdown 渲染优化（PR #34）
-  - 使用交互卡片和格式化器修复渲染问题
+    - 使用交互卡片和格式化器修复渲染问题
 - ♻️ 股票列表热重载（PR #42 修复）
-  - 分析前自动重载 `STOCK_LIST` 配置
+    - 分析前自动重载 `STOCK_LIST` 配置
 - 🐛 钉钉 Webhook 20KB 限制处理
-  - 长消息自动分块发送，避免被截断
+    - 长消息自动分块发送，避免被截断
 - 🔄 AkShare API 重试机制增强
-  - 添加失败缓存，避免重复请求失败接口
+    - 添加失败缓存，避免重复请求失败接口
 
 ### 改进
 - 📝 README 精简优化
-  - 高级配置移至 `docs/full-guide.md`
+    - 高级配置移至 `docs/full-guide.md`
 
 
 ## [1.3.0] - 2026-01-12
 
 ### 新增
 - 🔗 自定义 Webhook 支持
-  - 支持任意 POST JSON 的 Webhook 端点
-  - 自动识别钉钉、Discord、Slack、Bark 等常见服务格式
-  - 支持配置多个 Webhook（逗号分隔）
-  - 通过 `CUSTOM_WEBHOOK_URLS` 环境变量配置
+    - 支持任意 POST JSON 的 Webhook 端点
+    - 自动识别钉钉、Discord、Slack、Bark 等常见服务格式
+    - 支持配置多个 Webhook（逗号分隔）
+    - 通过 `CUSTOM_WEBHOOK_URLS` 环境变量配置
 
 ### 修复
 - 📝 企业微信长消息分批发送
-  - 解决自选股过多时内容超过 4096 字符限制导致推送失败的问题
-  - 智能按股票分析块分割，每批添加分页标记（如 1/3, 2/3）
-  - 批次间隔 1 秒，避免触发频率限制
+    - 解决自选股过多时内容超过 4096 字符限制导致推送失败的问题
+    - 智能按股票分析块分割，每批添加分页标记（如 1/3, 2/3）
+    - 批次间隔 1 秒，避免触发频率限制
 
 ## [1.2.0] - 2026-01-11
 
 ### 新增
 - 📢 多渠道推送支持
-  - 企业微信 Webhook
-  - 飞书 Webhook（新增）
-  - 邮件 SMTP（新增）
-  - 自动识别渠道类型，配置更简单
+    - 企业微信 Webhook
+    - 飞书 Webhook（新增）
+    - 邮件 SMTP（新增）
+    - 自动识别渠道类型，配置更简单
 
 ### 改进
 - 统一使用 `NOTIFICATION_URL` 配置，兼容旧的 `WECHAT_WEBHOOK_URL`
@@ -1799,31 +1836,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### 新增
 - 🤖 OpenAI 兼容 API 支持
-  - 支持 DeepSeek、通义千问、Moonshot、智谱 GLM 等
-  - Gemini 和 OpenAI 格式二选一
-  - 自动降级重试机制
+    - 支持 DeepSeek、通义千问、Moonshot、智谱 GLM 等
+    - Gemini 和 OpenAI 格式二选一
+    - 自动降级重试机制
 
 ## [1.0.0] - 2026-01-10
 
 ### 新增
 - 🎯 AI 决策仪表盘分析
-  - 一句话核心结论
-  - 精确买入/止损/目标点位
-  - 检查清单（✅⚠️❌）
-  - 分持仓建议（空仓者 vs 持仓者）
+    - 一句话核心结论
+    - 精确买入/止损/目标点位
+    - 检查清单（✅⚠️❌）
+    - 分持仓建议（空仓者 vs 持仓者）
 - 📊 大盘复盘功能
-  - 主要指数行情
-  - 涨跌统计
-  - 板块涨跌榜
-  - AI 生成复盘报告
+    - 主要指数行情
+    - 涨跌统计
+    - 板块涨跌榜
+    - AI 生成复盘报告
 - 🔍 多数据源支持
-  - AkShare（主数据源，免费）
-  - Tushare Pro
-  - Baostock
-  - YFinance
+    - AkShare（主数据源，免费）
+    - Tushare Pro
+    - Baostock
+    - YFinance
 - 📰 新闻搜索服务
-  - Tavily API
-  - SerpAPI
+    - Tavily API
+    - SerpAPI
 - 💬 企业微信机器人推送
 - ⏰ 定时任务调度
 - 🐳 Docker 部署支持
@@ -1900,3 +1937,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 [1.2.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ZhuLinsen/daily_stock_analysis/releases/tag/v1.0.0
+

@@ -160,3 +160,8 @@ class TestResolveNameToCode:
         result = resolve_name_to_code("aaaaaaa")
         assert result is None
         mock_akshare.assert_not_called()
+
+
+class TestResolveNameToCodeAliasSupport:
+    def test_stock_index_alias_lookup_for_common_short_name(self):
+        assert resolve_name_to_code("茅台") == "600519"
