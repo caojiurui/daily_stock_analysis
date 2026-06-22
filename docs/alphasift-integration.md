@@ -131,6 +131,8 @@ AlphaSift 侧已在 `ZhuLinsen/alphasift@377049857cc04175dc3cca62121ee41adec6cdb
 - `/api/v1/alphasift/screen`：调用适配层 `screen(..., use_llm=True)`，并在调用期间临时注入 DSA 已解析的 LLM 运行环境，同时向适配层传入结构化 LLM/DSA provider 配置；AlphaSift 在 LLM 前只消费轻量 DSA provider context，并优先通过 DSA 日线链路补齐 AlphaSift 因子特征，DSA 返回阶段对最终 Top 候选补新闻并复用已增强字段。适配层缺失或运行时异常返回 `424 + diagnostics` 并保留原始错误边界。
 - `/api/v1/alphasift/screen/tasks`：Web/桌面选股页使用的后台任务入口，提交后立即返回 `task_id`，实际选股在共享任务队列中继续执行，避免浏览器长请求被外部快照、行情、新闻或 LLM 延迟拖到超时。
 - `/api/v1/alphasift/screen/tasks/{task_id}`：查询后台选股任务状态。进行中返回 `pending/processing + progress/message`，完成后在 `result` 中返回与 `/screen` 相同的候选结构，失败时返回 `failed + error`；仅接受 `report_type=alphasift_screen` 的任务 ID，普通分析任务不会被误读为选股结果。
+- `/api/v1/alphasift/important-flashnews`：DSA 侧独立能力，不依赖 AlphaSift 适配层 `screen()`；默认联合抓取同花顺“全部重要简讯”标签 `62857`、“A股重要简讯”标签 `21101`、“异动”标签 `21111`，以及“今日炒什么”事件流接口，分页首请求显式使用 `seq=0`，随后按返回 `seq` 回溯最近 N 天事件；多路结果会先在 DSA 侧去重合并，再复用 DSA 当前 LiteLLM 配置分批汇总高可信板块/题材与相关股票。附加事件流失败时走 best-effort warning，不阻断其余快讯结果。
+- AlphaSift 候选股后置增强阶段的 `search_dsa_stock_news()` 现在会优先按个股代码拉取同花顺个股级公告、新闻、研报接口，并和既有搜索服务结果合并去重；这类 THS 接口只用于“候选股已确定后的单股证据补充”，不参与全市场初筛，且当代码不支持或 THS 失败时会自动回退到原有搜索服务。
 
 ## 配置兼容边界（LLM / LiteLLM / Base URL）
 

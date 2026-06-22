@@ -25,6 +25,11 @@ class AlphaSiftScreenRequest(BaseModel):
     max_results: int = Field(20, ge=1, le=100)
 
 
+class AlphaSiftImportantFlashnewsRequest(BaseModel):
+    days: int = Field(3, ge=1, le=7)
+    max_items: int = Field(300, ge=20, le=1000)
+
+
 class AlphaSiftStrategyResponse(BaseModel):
     id: str
     name: str = ""
@@ -214,4 +219,15 @@ def alphasift_screen(
         strategy=request.strategy,
         market=request.market,
         max_results=request.max_results,
+    )
+
+
+@router.post("/important-flashnews")
+def alphasift_important_flashnews(
+    request: AlphaSiftImportantFlashnewsRequest,
+    config: Config = Depends(get_config_dep),
+) -> Dict[str, Any]:
+    return _service(config).important_flashnews(
+        days=request.days,
+        max_items=request.max_items,
     )

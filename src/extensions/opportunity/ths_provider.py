@@ -6,7 +6,7 @@ spreading provider-specific logic across the scoring and API layers.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from queue import Queue
 import re
 from threading import Thread
@@ -16,6 +16,10 @@ import requests
 
 
 _THS_FLASHNEWS_API_URL = "https://news.10jqka.com.cn/app/flash/flashnews/v1/list"
+_THS_IMPORTANT_FLASHNEWS_TAG_ID = "62857"
+_THS_A_SHARE_IMPORTANT_FLASHNEWS_TAG_ID = "21101"
+_THS_ABNORMAL_MOVES_FLASHNEWS_TAG_ID = "21111"
+_THS_TODAY_EVENT_API_URL = "https://news.10jqka.com.cn/app/concept_v2_api/open/api/concept/event/jtcsm/v1/event/list"
 _THS_FLASHNEWS_HEADERS = {
     "Pragma": "no-cache",
     "Cache-Control": "no-cache",
@@ -93,6 +97,30 @@ def _parse_ths_flashnews_datetime(value: Any) -> Optional[str]:
     return dt.isoformat(timespec="seconds")
 
 
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    text = _normalize_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone()
+
+
+def _to_positive_int(value: Any) -> Optional[int]:
+    text = _normalize_text(value)
+    if not text:
+        return None
+    try:
+        number = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _truncate_text(text: str, *, limit: int) -> str:
     normalized = _normalize_text(text)
     if len(normalized) <= limit:
@@ -135,7 +163,40 @@ def normalize_ths_flashnews_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "url": _normalize_text(item.get("shareUrl") or item.get("url") or item.get("appUrl")),
         "published_at": published_at,
         "tag_id": extract_ths_flashnews_tag_id(item),
+        "source_type": _normalize_text(item.get("source_type")) or "ths_flashnews",
+        "source_label": _normalize_text(item.get("source_label")) or "同花顺重要快讯",
     }
+
+
+def _request_ths_list_page(
+    *,
+    url: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout_seconds: float = 6.0,
+    session: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    requester = session.get if session is not None else requests.get
+    response = requester(
+        url,
+        params=dict(params or {}),
+        headers=dict(_THS_FLASHNEWS_HEADERS),
+        timeout=max(1.0, float(timeout_seconds)),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or int(payload.get("status_code") or -1) != 0:
+        return []
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    items = data.get("list")
+    if not isinstance(items, list):
+        return []
+    return [
+        normalize_ths_flashnews_item(item)
+        for item in items
+        if isinstance(item, dict)
+    ]
 
 
 def fetch_ths_flashnews_items(
@@ -152,33 +213,166 @@ def fetch_ths_flashnews_items(
     params: Dict[str, Any] = {"tagId": normalized_tag_id}
     if seq is not None:
         params["seq"] = int(seq)
-    requester = session.get if session is not None else requests.get
-    response = requester(
-        _THS_FLASHNEWS_API_URL,
+    normalized_items = _request_ths_list_page(
+        url=_THS_FLASHNEWS_API_URL,
         params=params,
-        headers=dict(_THS_FLASHNEWS_HEADERS),
-        timeout=max(1.0, float(timeout_seconds)),
+        timeout_seconds=timeout_seconds,
+        session=session,
     )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict) or int(payload.get("status_code") or -1) != 0:
-        return []
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return []
-    items = data.get("list")
-    if not isinstance(items, list):
-        return []
-    normalized_items = [
-        normalize_ths_flashnews_item(item)
-        for item in items
-        if isinstance(item, dict)
-    ]
     return [
         item
         for item in normalized_items[: max(0, int(limit or 0))]
         if item.get("title")
     ]
+
+
+def fetch_ths_important_flashnews_items(
+    *,
+    days: int = 3,
+    tag_id: str = _THS_IMPORTANT_FLASHNEWS_TAG_ID,
+    extra_tag_ids: Optional[List[str]] = None,
+    max_items: int = 800,
+    max_pages: int = 80,
+    timeout_seconds: float = 6.0,
+    session: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    window_days = max(1, int(days or 1))
+    item_limit = max(1, int(max_items or 1))
+    page_limit = max(1, int(max_pages or 1))
+    cutoff = datetime.now().astimezone() - timedelta(days=window_days)
+    results: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
+    tag_ids = [_normalize_ths_flashnews_tag_id(tag_id)]
+    for value in extra_tag_ids or []:
+        normalized = _normalize_ths_flashnews_tag_id(value)
+        if normalized and normalized not in tag_ids:
+            tag_ids.append(normalized)
+
+    for current_tag_id in [value for value in tag_ids if value]:
+        next_seq: Optional[int] = 0
+        for _ in range(page_limit):
+            page_items = fetch_ths_flashnews_items(
+                tag_id=current_tag_id,
+                seq=next_seq,
+                limit=max(item_limit, 50),
+                timeout_seconds=timeout_seconds,
+                session=session,
+            )
+            if not page_items:
+                break
+            reached_cutoff = False
+            for item in page_items:
+                title = _normalize_text(item.get("title"))
+                if not title:
+                    continue
+                item_id = _normalize_text(item.get("id"))
+                title_key = title.lower()
+                if item_id and item_id in seen_ids:
+                    continue
+                if title_key and title_key in seen_titles:
+                    continue
+                published_dt = _parse_iso_datetime(item.get("published_at"))
+                if published_dt is not None and published_dt < cutoff:
+                    reached_cutoff = True
+                    continue
+                if item_id:
+                    seen_ids.add(item_id)
+                if title_key:
+                    seen_titles.add(title_key)
+                results.append(item)
+                if len(results) >= item_limit:
+                    return sorted(
+                        results,
+                        key=lambda entry: _normalize_text(entry.get("published_at")),
+                        reverse=True,
+                    )[:item_limit]
+            last_seq = _to_positive_int(page_items[-1].get("seq"))
+            if last_seq is None or last_seq == next_seq:
+                break
+            next_seq = last_seq
+            if reached_cutoff:
+                break
+    results.sort(
+        key=lambda entry: _normalize_text(entry.get("published_at")),
+        reverse=True,
+    )
+    return results[:item_limit]
+
+
+def fetch_ths_today_trade_event_items(
+    *,
+    days: int = 3,
+    max_items: int = 400,
+    max_pages: int = 40,
+    timeout_seconds: float = 6.0,
+    session: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    window_days = max(1, int(days or 1))
+    item_limit = max(1, int(max_items or 1))
+    page_limit = max(1, int(max_pages or 1))
+    cutoff = datetime.now().astimezone() - timedelta(days=window_days)
+    results: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
+    next_seq: Optional[int] = 0
+
+    for _ in range(page_limit):
+        params: Dict[str, Any] = {"seq": int(next_seq or 0)}
+        page_items = _request_ths_list_page(
+            url=_THS_TODAY_EVENT_API_URL,
+            params=params,
+            timeout_seconds=timeout_seconds,
+            session=session,
+        )
+        normalized_items = [
+            {
+                **normalize_ths_flashnews_item(item),
+                "source_type": "ths_today_trade_event",
+                "source_label": "同花顺今日炒什么",
+            }
+            for item in page_items
+            if isinstance(item, dict)
+        ]
+        if not normalized_items:
+            break
+        reached_cutoff = False
+        for item in normalized_items:
+            title = _normalize_text(item.get("title"))
+            if not title:
+                continue
+            item_id = _normalize_text(item.get("id"))
+            title_key = title.lower()
+            if item_id and item_id in seen_ids:
+                continue
+            if title_key and title_key in seen_titles:
+                continue
+            published_dt = _parse_iso_datetime(item.get("published_at"))
+            if published_dt is not None and published_dt < cutoff:
+                reached_cutoff = True
+                continue
+            if item_id:
+                seen_ids.add(item_id)
+            if title_key:
+                seen_titles.add(title_key)
+            results.append(item)
+            if len(results) >= item_limit:
+                results.sort(
+                    key=lambda entry: _normalize_text(entry.get("published_at")),
+                    reverse=True,
+                )
+                return results[:item_limit]
+        last_seq = _to_positive_int(normalized_items[-1].get("seq"))
+        if last_seq is None or last_seq == next_seq:
+            break
+        next_seq = last_seq
+        if reached_cutoff:
+            break
+    results.sort(
+        key=lambda entry: _normalize_text(entry.get("published_at")),
+        reverse=True,
+    )
+    return results[:item_limit]
 
 
 def format_ths_flashnews_event(item: Dict[str, Any], *, max_chars: int = 120) -> str:

@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import re
+import requests
 import subprocess
 import sys
 import threading
@@ -25,15 +26,21 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
+from data_provider.base import normalize_stock_code
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC, get_configured_llm_models
 from src.extensions.opportunity.ths_provider import (
     extract_ths_flashnews_tag_id,
+    fetch_ths_important_flashnews_items,
     fetch_ths_flashnews_items,
+    fetch_ths_today_trade_event_items,
     format_ths_flashnews_event,
 )
 from src.llm.errors import call_litellm_with_param_recovery
-from src.llm.generation_params import apply_litellm_generation_params, resolve_litellm_temperature_directive
+from src.llm.generation_params import (
+    apply_litellm_generation_params,
+    resolve_litellm_temperature_directive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,11 @@ DSA_ALPHASIFT_HOTSPOT_DETAIL_CACHE_TTL_SECONDS = 30 * 60
 DSA_ALPHASIFT_HOTSPOT_EVENT_SUMMARY_MAX_CHARS = 90
 DSA_ALPHASIFT_HOTSPOT_PREFETCH_DETAIL_COUNT = 8
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_CODE = "eastmoney_hotspot_unavailable"
+DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_TOPIC_MAX_ITEMS = 10
+DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_STOCK_MAX_ITEMS = 20
+DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_BATCH_SIZE = 40
+DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_MAX_BATCHES = 12
+DSA_ALPHASIFT_THS_STOCK_INTEL_SIZE = 20
 DSA_ALPHASIFT_HOTSPOT_UNAVAILABLE_MESSAGE = "热点源连接中断，暂无可用缓存。"
 DSA_ALPHASIFT_HOTSPOT_CONNECTIVITY_ERROR_MARKERS = (
     "remote disconnected",
@@ -85,6 +97,22 @@ _ALPHASIFT_LITELLM_COMPLETION_ROUTES: ContextVar[Optional[Tuple[Dict[str, Any], 
 )
 _ALPHASIFT_LITELLM_COMPLETION_ATTR = "_alphasift_litellm_completion_bridge"
 _ALPHASIFT_LITELLM_COMPLETION_LOCK = threading.Lock()
+_THS_STOCK_NEWS_API_URL = "https://news.10jqka.com.cn/timeline_web/web/v1/news/list"
+_THS_STOCK_NOTICE_API_URL = "https://stockpage.10jqka.com.cn/stock_page/api/v1/stockpage/notices"
+_THS_STOCK_REPORT_API_URL = "https://stockpage.10jqka.com.cn/stock_page/api/v1/stockpage/reports"
+_THS_STOCK_INTEL_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Pragma": "no-cache",
+    "Cache-Control": "no-cache",
+    "Referer": "https://www.10jqka.com.cn/",
+    "User-Agent": "Mozilla/5.0",
+}
+_THS_STOCK_INTEL_SOURCE_PRIORITY = {
+    "ths_notice": 0,
+    "ths_news": 1,
+    "ths_report": 2,
+    "dsa_search": 3,
+}
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -1032,6 +1060,62 @@ class AlphaSiftService:
             "history": item,
             "result": payload,
         }
+
+    def important_flashnews(self, *, days: int = 3, max_items: int = 300) -> Dict[str, Any]:
+        _ensure_alphasift_enabled(self.config)
+        window_days = max(1, min(int(days or 3), 7))
+        item_limit = max(20, min(int(max_items or 300), 1000))
+        tag_ids = _important_flashnews_tag_ids()
+        warnings: List[str] = []
+        try:
+            flashnews_items = fetch_ths_important_flashnews_items(
+                days=window_days,
+                tag_id=tag_ids[0],
+                extra_tag_ids=tag_ids[1:],
+                max_items=item_limit,
+                timeout_seconds=6.0,
+            )
+        except Exception as exc:
+            flashnews_items = []
+            warnings.append(f"ths_important_flashnews_failed:{type(exc).__name__}")
+        try:
+            today_trade_items = fetch_ths_today_trade_event_items(
+                days=window_days,
+                max_items=max(60, item_limit // 2),
+                timeout_seconds=6.0,
+            )
+        except Exception as exc:
+            today_trade_items = []
+            warnings.append(f"ths_today_trade_event_failed:{type(exc).__name__}")
+        items = _dedupe_flashnews_items(
+            [*flashnews_items, *today_trade_items],
+            max_items=item_limit,
+        )
+        if not items:
+            raise HTTPException(
+                status_code=424,
+                detail={
+                    "error": "alphasift_important_flashnews_fetch_failed",
+                    "message": "重要简讯与今日炒什么抓取均失败或无可用结果。",
+                },
+            )
+        analysis = _analyze_important_flashnews_with_llm(
+            items=items,
+            days=window_days,
+            max_items=item_limit,
+            config=self.config,
+        )
+        payload = {
+            "enabled": True,
+            "days": window_days,
+            "requested_max_items": item_limit,
+            "tag_ids": tag_ids,
+            "include_today_trade_events": True,
+            "flashnews_count": len(items),
+            **analysis,
+        }
+        payload["warnings"] = _dedupe_strings([*warnings, *(_list_text_values(payload.get("warnings")))])
+        return payload
 
     def hotspots(
         self,
@@ -3443,34 +3527,284 @@ def get_dsa_fundamental_context(stock_code: str) -> Dict[str, Any]:
     return _compact_fundamental_context(_remove_non_finite_json_values(_to_plain(context)))
 
 
-def search_dsa_stock_news(stock_code: str, stock_name: str = "", max_results: int = 3) -> Dict[str, Any]:
-    service = _get_dsa_search_service()
-    if not getattr(service, "is_available", False):
+def _parse_ths_stock_publish_time(value: Any) -> Optional[str]:
+    text = _env_text(value)
+    if not text:
+        return None
+    try:
+        timestamp = int(float(text))
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    if timestamp > 10**12:
+        timestamp //= 1000
+    try:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _ths_stock_market_id(stock_code: str) -> Optional[int]:
+    normalized = normalize_stock_code(_env_text(stock_code)).upper()
+    if not normalized.isdigit() or len(normalized) != 6:
+        return None
+    if normalized.startswith(("5", "6", "9")):
+        return 17
+    if normalized.startswith(("0", "1", "2", "3")):
+        return 33
+    return None
+
+
+def _ths_stock_code_value(stock_code: str) -> str:
+    normalized = normalize_stock_code(_env_text(stock_code)).upper()
+    return normalized if normalized.isdigit() and len(normalized) == 6 else ""
+
+
+def _request_ths_stock_intel(
+    *,
+    url: str,
+    params: Dict[str, Any],
+    list_key: str,
+    timeout_seconds: float = 6.0,
+) -> List[Dict[str, Any]]:
+    response = requests.get(
+        url,
+        params=params,
+        headers=dict(_THS_STOCK_INTEL_HEADERS),
+        timeout=max(1.0, float(timeout_seconds)),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    items = data.get(list_key) if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _normalize_ths_stock_intel_item(item: Dict[str, Any], *, source_type: str) -> Dict[str, Any]:
+    source_labels = {
+        "ths_notice": "同花顺公告",
+        "ths_news": "同花顺新闻",
+        "ths_report": "同花顺研报",
+    }
+    return {
+        "title": _env_text(item.get("title")),
+        "snippet": _env_text(item.get("summary")),
+        "url": _env_text(item.get("jumpUrl")),
+        "source": _env_text(item.get("source")) or source_labels.get(source_type, "同花顺"),
+        "published_date": _parse_ths_stock_publish_time(item.get("publishTime")),
+        "source_type": source_type,
+        "author": _env_text(item.get("author")),
+    }
+
+
+def _fetch_ths_stock_news_items(stock_code: str, *, max_results: int) -> List[Dict[str, Any]]:
+    code = _ths_stock_code_value(stock_code)
+    market_id = _ths_stock_market_id(stock_code)
+    if not code or market_id is None:
+        return []
+    items = _request_ths_stock_intel(
+        url=_THS_STOCK_NEWS_API_URL,
+        params={
+            "marketId": market_id,
+            "code": code,
+            "offset": "first",
+            "size": max(1, int(max_results or 1)),
+        },
+        list_key="newsList",
+    )
+    return [
+        normalized
+        for normalized in (_normalize_ths_stock_intel_item(item, source_type="ths_news") for item in items)
+        if normalized.get("title")
+    ]
+
+
+def _fetch_ths_stock_notice_items(stock_code: str, *, max_results: int) -> List[Dict[str, Any]]:
+    code = _ths_stock_code_value(stock_code)
+    market_id = _ths_stock_market_id(stock_code)
+    if not code or market_id is None:
+        return []
+    items = _request_ths_stock_intel(
+        url=_THS_STOCK_NOTICE_API_URL,
+        params={
+            "marketId": market_id,
+            "code": code,
+            "size": max(1, int(max_results or 1)),
+            "noticeCategory": "all",
+        },
+        list_key="noticeList",
+    )
+    return [
+        normalized
+        for normalized in (_normalize_ths_stock_intel_item(item, source_type="ths_notice") for item in items)
+        if normalized.get("title")
+    ]
+
+
+def _fetch_ths_stock_report_items(stock_code: str, *, max_results: int) -> List[Dict[str, Any]]:
+    code = _ths_stock_code_value(stock_code)
+    market_id = _ths_stock_market_id(stock_code)
+    if not code or market_id is None:
+        return []
+    items = _request_ths_stock_intel(
+        url=_THS_STOCK_REPORT_API_URL,
+        params={
+            "marketId": market_id,
+            "code": code,
+            "size": max(1, int(max_results or 1)),
+        },
+        list_key="reportList",
+    )
+    return [
+        normalized
+        for normalized in (_normalize_ths_stock_intel_item(item, source_type="ths_report") for item in items)
+        if normalized.get("title")
+    ]
+
+
+def _sort_stock_news_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _priority(item: Dict[str, Any]) -> Tuple[int, str, str]:
+        source_type = _env_text(item.get("source_type")) or "dsa_search"
+        published = _env_text(item.get("published_date"))
+        title = _env_text(item.get("title"))
+        return (
+            _THS_STOCK_INTEL_SOURCE_PRIORITY.get(source_type, 99),
+            "" if published else "1",
+            published,
+        )
+
+    return sorted(items, key=_priority)
+
+
+def _dedupe_stock_news_results(items: List[Dict[str, Any]], *, max_results: int) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for item in _sort_stock_news_results(items):
+        if not isinstance(item, dict):
+            continue
+        title = _env_text(item.get("title"))
+        url = _env_text(item.get("url"))
+        if not title and not url:
+            continue
+        key = url or title.lower()
+        if key in seen_keys:
+            continue
+        deduped.append(item)
+        seen_keys.add(key)
+        if len(deduped) >= max(1, int(max_results or 1)):
+            break
+    return deduped
+
+
+def _fetch_ths_stock_intel_items(stock_code: str, *, max_results: int) -> Dict[str, Any]:
+    code = _ths_stock_code_value(stock_code)
+    market_id = _ths_stock_market_id(stock_code)
+    if not code or market_id is None:
         return {
             "success": False,
-            "error": "DSA search service unavailable",
+            "provider": "ths_stock_intel",
+            "error": "ths_stock_intel_unsupported_code",
             "results": [],
+            "market_id": market_id,
         }
 
-    response = service.search_stock_news(stock_code, stock_name or stock_code, max_results=max_results)
-    results = []
-    for item in getattr(response, "results", []) or []:
-        results.append(
-            {
-                "title": getattr(item, "title", ""),
-                "snippet": getattr(item, "snippet", ""),
-                "url": getattr(item, "url", ""),
-                "source": getattr(item, "source", ""),
-                "published_date": getattr(item, "published_date", None),
-            }
-        )
-    return _remove_non_finite_json_values(
-        {
+    items: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    fetch_specs = (
+        ("notice", _fetch_ths_stock_notice_items),
+        ("news", _fetch_ths_stock_news_items),
+        ("report", _fetch_ths_stock_report_items),
+    )
+    for label, fetcher in fetch_specs:
+        try:
+            items.extend(fetcher(code, max_results=max_results))
+        except Exception as exc:  # noqa: BLE001 - THS enrichment must be best-effort.
+            warnings.append(f"ths_stock_{label}_failed: {exc}")
+    deduped = _dedupe_stock_news_results(items, max_results=max_results)
+    return {
+        "success": bool(deduped),
+        "provider": "ths_stock_intel",
+        "error": None if deduped else (warnings[0] if warnings else "ths_stock_intel_empty"),
+        "results": deduped,
+        "warnings": _dedupe_strings(warnings),
+        "market_id": market_id,
+    }
+
+
+def search_dsa_stock_news(stock_code: str, stock_name: str = "", max_results: int = 3) -> Dict[str, Any]:
+    max_items = max(1, int(max_results or 1))
+    ths_response = _fetch_ths_stock_intel_items(
+        stock_code,
+        max_results=max(max_items, DSA_ALPHASIFT_THS_STOCK_INTEL_SIZE),
+    )
+
+    search_payload = {
+        "query": "",
+        "provider": "",
+        "success": False,
+        "error": None,
+        "results": [],
+    }
+    service = _get_dsa_search_service()
+    if getattr(service, "is_available", False):
+        response = service.search_stock_news(stock_code, stock_name or stock_code, max_results=max_items)
+        search_results = []
+        for item in getattr(response, "results", []) or []:
+            search_results.append(
+                {
+                    "title": getattr(item, "title", ""),
+                    "snippet": getattr(item, "snippet", ""),
+                    "url": getattr(item, "url", ""),
+                    "source": getattr(item, "source", ""),
+                    "published_date": getattr(item, "published_date", None),
+                    "source_type": "dsa_search",
+                }
+            )
+        search_payload = {
             "query": getattr(response, "query", ""),
             "provider": getattr(response, "provider", ""),
             "success": bool(getattr(response, "success", False)),
             "error": getattr(response, "error_message", None),
-            "results": results,
+            "results": search_results,
+        }
+    else:
+        search_payload["error"] = "DSA search service unavailable"
+
+    merged_results = _dedupe_stock_news_results(
+        [*(ths_response.get("results") or []), *(search_payload.get("results") or [])],
+        max_results=max_items,
+    )
+    warnings = _dedupe_strings([
+        *(ths_response.get("warnings") or []),
+        search_payload.get("error") if search_payload.get("error") and search_payload.get("success") is False else "",
+    ])
+    success = bool(merged_results)
+    provider_parts = [
+        provider
+        for provider in [ths_response.get("provider") if ths_response.get("success") else "", search_payload.get("provider")]
+        if _env_text(provider)
+    ]
+    error = None
+    if not success:
+        error = search_payload.get("error") or ths_response.get("error") or "stock_news_unavailable"
+    return _remove_non_finite_json_values(
+        {
+            "query": search_payload.get("query") or stock_name or stock_code,
+            "provider": "+".join(provider_parts),
+            "success": success,
+            "error": error,
+            "warnings": warnings,
+            "results": merged_results,
+            "ths_stock_intel": {
+                "success": bool(ths_response.get("success")),
+                "provider": ths_response.get("provider"),
+                "error": ths_response.get("error"),
+                "market_id": ths_response.get("market_id"),
+                "result_count": len(ths_response.get("results") or []),
+            },
         }
     )
 
@@ -3724,6 +4058,378 @@ def _build_dsa_analysis_summary(
     if not parts:
         return ""
     return "；".join(parts)
+
+
+def _chunk_items(items: List[Dict[str, Any]], chunk_size: int) -> List[List[Dict[str, Any]]]:
+    size = max(1, int(chunk_size or 1))
+    return [items[index:index + size] for index in range(0, len(items), size)]
+
+
+def _normalize_flashnews_title(value: Any) -> str:
+    return _normalize_inline_text(value).replace("\n", " ").strip()
+
+
+def _dedupe_flashnews_items(items: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_titles: set[str] = set()
+    ordered = sorted(
+        [item for item in items if isinstance(item, dict)],
+        key=lambda entry: _env_text(entry.get("published_at")),
+        reverse=True,
+    )
+    for item in ordered:
+        item_id = _env_text(item.get("id"))
+        title = _normalize_flashnews_title(item.get("title"))
+        title_key = title.lower()
+        if item_id and item_id in seen_ids:
+            continue
+        if title_key and title_key in seen_titles:
+            continue
+        if item_id:
+            seen_ids.add(item_id)
+        if title_key:
+            seen_titles.add(title_key)
+        deduped.append(item)
+        if len(deduped) >= max(1, int(max_items or 1)):
+            break
+    return deduped
+
+
+def _compact_flashnews_item(item: Dict[str, Any]) -> str:
+    published_at = _env_text(item.get("published_at"))
+    title = _normalize_flashnews_title(item.get("title"))
+    summary = _normalize_inline_text(item.get("summary"))
+    source_label = _normalize_inline_text(item.get("source_label"))
+    parts: List[str] = []
+    if published_at:
+        parts.append(published_at[:19])
+    if source_label:
+        parts.append(source_label)
+    if title:
+        parts.append(title)
+    if summary and summary not in title:
+        parts.append(_truncate_text(summary, 80))
+    return " | ".join(part for part in parts if part)
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    content = _normalize_inline_text(text)
+    if not content:
+        return {}
+    try:
+        parsed = json.loads(content)
+    except Exception:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalize_ranked_items(items: Any, *, kind: str, max_count: int) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(items, list):
+        return normalized
+    seen: set[str] = set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        name = _normalize_inline_text(raw.get("name"))
+        if not name or name in seen:
+            continue
+        confidence = _safe_float(raw.get("confidence"))
+        score = _safe_float(raw.get("score"))
+        reasons = raw.get("reasons")
+        if isinstance(reasons, list):
+            reason_list = [_normalize_inline_text(item) for item in reasons if _normalize_inline_text(item)]
+        else:
+            single_reason = _normalize_inline_text(raw.get("reason"))
+            reason_list = [single_reason] if single_reason else []
+        item: Dict[str, Any] = {
+            "name": name,
+            "reasons": reason_list[:3],
+        }
+        if confidence is not None:
+            item["confidence"] = round(max(0.0, min(1.0, confidence)), 4)
+        if score is not None:
+            item["score"] = round(max(0.0, min(100.0, score)), 2)
+        if kind == "stock":
+            symbol = _env_text(raw.get("symbol") or raw.get("code"))
+            if symbol:
+                item["symbol"] = symbol.upper()
+            sector = _normalize_inline_text(raw.get("sector"))
+            if sector:
+                item["sector"] = sector
+        seen.add(name)
+        normalized.append(item)
+        if len(normalized) >= max(1, int(max_count or 1)):
+            break
+    return normalized
+
+
+def _merge_ranked_items(groups: List[List[Dict[str, Any]]], *, kind: str, max_count: int) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for items in groups:
+        for item in items:
+            name = _normalize_inline_text(item.get("name"))
+            if not name:
+                continue
+            existing = merged.get(name)
+            if existing is None:
+                merged[name] = dict(item)
+                continue
+            existing_confidence = _safe_float(existing.get("confidence")) or 0.0
+            current_confidence = _safe_float(item.get("confidence")) or 0.0
+            if current_confidence > existing_confidence:
+                merged[name] = {**existing, **item}
+                existing = merged[name]
+            reasons = [
+                _normalize_inline_text(reason)
+                for reason in [*(existing.get("reasons") or []), *(item.get("reasons") or [])]
+                if _normalize_inline_text(reason)
+            ]
+            deduped: List[str] = []
+            seen_reasons: set[str] = set()
+            for reason in reasons:
+                if reason in seen_reasons:
+                    continue
+                deduped.append(reason)
+                seen_reasons.add(reason)
+                if len(deduped) >= 3:
+                    break
+            existing["reasons"] = deduped
+            if kind == "stock" and not existing.get("sector") and item.get("sector"):
+                existing["sector"] = item.get("sector")
+            if kind == "stock" and not existing.get("symbol") and item.get("symbol"):
+                existing["symbol"] = item.get("symbol")
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (
+            -(_safe_float(item.get("confidence")) or 0.0),
+            -(_safe_float(item.get("score")) or 0.0),
+            item.get("name") or "",
+        ),
+    )
+    return ordered[:max(1, int(max_count or 1))]
+
+
+def _normalize_flashnews_intermediate_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "market_view": _normalize_inline_text(payload.get("market_view")),
+        "selection_logic": _normalize_inline_text(payload.get("selection_logic")),
+        "themes": _normalize_ranked_items(
+            payload.get("themes") or payload.get("sectors"),
+            kind="theme",
+            max_count=DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_TOPIC_MAX_ITEMS,
+        ),
+        "stocks": _normalize_ranked_items(
+            payload.get("stocks"),
+            kind="stock",
+            max_count=DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_STOCK_MAX_ITEMS,
+        ),
+        "warnings": [
+            _normalize_inline_text(item)
+            for item in (payload.get("warnings") or [])
+            if _normalize_inline_text(item)
+        ][:5],
+    }
+
+
+def _build_important_flashnews_batch_prompt(*, items: List[Dict[str, Any]], days: int, batch_index: int, batch_count: int) -> str:
+    lines = [
+        f"你是A股盘面研究员。以下是最近{days}天的重要简讯，第 {batch_index}/{batch_count} 批。",
+        "请只根据这些简讯，提取最可靠、可交易、且重复验证度高的板块/题材与相关股票。",
+        "优先保留政策、产业趋势、业绩、订单、供给、价格、景气度、资金风格等强催化。",
+        "忽略纯情绪标题、重复快讯、无法落到板块或股票的泛新闻。",
+        "返回严格 JSON，不要额外解释。",
+        'JSON schema: {"market_view":"", "selection_logic":"", "themes":[{"name":"","confidence":0-1,"score":0-100,"reasons":[""]}], "stocks":[{"name":"","symbol":"","sector":"","confidence":0-1,"score":0-100,"reasons":[""]}], "warnings":[""]}',
+        "",
+        "简讯列表：",
+    ]
+    for index, item in enumerate(items, start=1):
+        lines.append(f"{index}. {_compact_flashnews_item(item)}")
+    return "\n".join(lines)
+
+
+def _build_important_flashnews_final_prompt(
+    *,
+    batch_results: List[Dict[str, Any]],
+    days: int,
+    flashnews_count: int,
+) -> str:
+    lines = [
+        f"你是A股盘面研究员。已对最近{days}天共{flashnews_count}条重要简讯做了分批提炼。",
+        "现在请合并这些中间结果，输出最终最可靠的板块/题材和股票。",
+        "优先保留跨批次重复出现、逻辑最硬、与A股映射最清晰的方向。",
+        "返回严格 JSON，不要额外解释。",
+        'JSON schema: {"market_view":"", "selection_logic":"", "themes":[{"name":"","confidence":0-1,"score":0-100,"reasons":[""]}], "stocks":[{"name":"","symbol":"","sector":"","confidence":0-1,"score":0-100,"reasons":[""]}], "warnings":[""]}',
+        "",
+        "分批摘要：",
+    ]
+    for index, result in enumerate(batch_results, start=1):
+        lines.append(
+            json.dumps(
+                {
+                    "batch": index,
+                    "market_view": result.get("market_view") or "",
+                    "selection_logic": result.get("selection_logic") or "",
+                    "themes": result.get("themes") or [],
+                    "stocks": result.get("stocks") or [],
+                    "warnings": result.get("warnings") or [],
+                },
+                ensure_ascii=False,
+            )
+        )
+    return "\n".join(lines)
+
+
+def _call_alphasift_json_llm(*, prompt: str, config: Config, timeout_seconds: float = 20.0) -> Dict[str, Any]:
+    model, fallback_models = _resolve_alphasift_llm_models(config)
+    if not _env_text(model):
+        return {}
+    context = _build_alphasift_context(config)
+    model_list = context.get("llm", {}).get("model_list") if isinstance(context.get("llm"), dict) else None
+    temperature = context.get("llm", {}).get("temperature") if isinstance(context.get("llm"), dict) else None
+    call_kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是A股事件驱动研究助手，只输出合法 JSON。"},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 2200,
+        "timeout": max(8.0, float(timeout_seconds)),
+        "response_format": {"type": "json_object"},
+    }
+    if fallback_models:
+        call_kwargs["fallbacks"] = list(fallback_models)
+    call_kwargs = apply_litellm_generation_params(
+        call_kwargs,
+        model,
+        temperature if isinstance(temperature, (int, float)) else 0.2,
+    )
+    try:
+        import litellm
+
+        with _alphasift_litellm_headers(config):
+            response = call_litellm_with_param_recovery(
+                lambda kwargs: litellm.completion(**kwargs),
+                model=model,
+                call_kwargs=call_kwargs,
+                model_list=model_list if isinstance(model_list, list) else None,
+                logger=logger,
+                log_label="[AlphaSift flashnews]",
+            )
+    except Exception as exc:
+        logger.info("AlphaSift important flashnews LLM skipped: %s", exc)
+        return {}
+    return _extract_json_object(_extract_litellm_message_content(response))
+
+
+def _analyze_important_flashnews_with_llm(
+    *,
+    items: List[Dict[str, Any]],
+    days: int,
+    max_items: int,
+    config: Config,
+) -> Dict[str, Any]:
+    normalized_items = [item for item in items if isinstance(item, dict) and _normalize_flashnews_title(item.get("title"))]
+    if not normalized_items:
+        return {
+            "market_view": "",
+            "selection_logic": "",
+            "themes": [],
+            "stocks": [],
+            "warnings": ["important_flashnews_empty"],
+            "llm_ranked": False,
+            "llm_batches": 0,
+        }
+
+    batches = _chunk_items(
+        normalized_items[:max(1, int(max_items or 1))],
+        DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_BATCH_SIZE,
+    )[:DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_MAX_BATCHES]
+    intermediate_results: List[Dict[str, Any]] = []
+    parse_warnings: List[str] = []
+    for index, batch in enumerate(batches, start=1):
+        payload = _call_alphasift_json_llm(
+            prompt=_build_important_flashnews_batch_prompt(
+                items=batch,
+                days=days,
+                batch_index=index,
+                batch_count=len(batches),
+            ),
+            config=config,
+            timeout_seconds=20.0,
+        )
+        normalized = _normalize_flashnews_intermediate_result(payload)
+        if normalized.get("themes") or normalized.get("stocks") or normalized.get("market_view"):
+            intermediate_results.append(normalized)
+        else:
+            parse_warnings.append(f"batch_{index}_empty")
+
+    if not intermediate_results:
+        return {
+            "market_view": "",
+            "selection_logic": "",
+            "themes": [],
+            "stocks": [],
+            "warnings": ["important_flashnews_llm_unavailable", *parse_warnings][:6],
+            "llm_ranked": False,
+            "llm_batches": len(batches),
+        }
+
+    final_payload = _call_alphasift_json_llm(
+        prompt=_build_important_flashnews_final_prompt(
+            batch_results=intermediate_results,
+            days=days,
+            flashnews_count=len(normalized_items),
+        ),
+        config=config,
+        timeout_seconds=25.0,
+    )
+    final_result = _normalize_flashnews_intermediate_result(final_payload)
+    themes = final_result.get("themes") or _merge_ranked_items(
+        [item.get("themes") or [] for item in intermediate_results],
+        kind="theme",
+        max_count=DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_TOPIC_MAX_ITEMS,
+    )
+    stocks = final_result.get("stocks") or _merge_ranked_items(
+        [item.get("stocks") or [] for item in intermediate_results],
+        kind="stock",
+        max_count=DSA_ALPHASIFT_IMPORTANT_FLASHNEWS_STOCK_MAX_ITEMS,
+    )
+    warnings = _dedupe_strings([
+        *parse_warnings,
+        *(_list_text_values(final_result.get("warnings"))),
+        *[
+            warning
+            for item in intermediate_results
+            for warning in _list_text_values(item.get("warnings"))
+        ],
+    ])
+    return {
+        "market_view": final_result.get("market_view") or next(
+            (item.get("market_view") for item in intermediate_results if item.get("market_view")),
+            "",
+        ),
+        "selection_logic": final_result.get("selection_logic") or next(
+            (item.get("selection_logic") for item in intermediate_results if item.get("selection_logic")),
+            "",
+        ),
+        "themes": themes,
+        "stocks": stocks,
+        "warnings": warnings[:8],
+        "llm_ranked": True,
+        "llm_batches": len(batches),
+    }
+
+
+def _important_flashnews_tag_ids() -> List[str]:
+    return ["62857", "21101", "21111"]
 
 
 def _ensure_supported_market(market: str) -> None:

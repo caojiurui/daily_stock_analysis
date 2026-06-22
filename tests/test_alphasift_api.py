@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 from api.v1.endpoints import alphasift as alphasift_endpoint
 from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC
+from src.search_service import SearchResponse, SearchResult
 from src.services import alphasift_service
 from src.services.task_queue import TaskInfo, TaskStatus as QueueTaskStatus
 
@@ -120,6 +121,12 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(os.environ, {"ALPHASIFT_DATA_DIR": str(Path(tmpdir) / "alphasift")}, clear=False):
                 return alphasift_endpoint.alphasift_hotspot_detail(config=config, **kwargs)
+
+    def _important_flashnews(self, config: Config, **kwargs):
+        return alphasift_endpoint.alphasift_important_flashnews(
+            alphasift_endpoint.AlphaSiftImportantFlashnewsRequest(**kwargs),
+            config=config,
+        )
 
     def test_default_install_spec_is_commit_pinned(self) -> None:
         self.assertRegex(
@@ -1896,6 +1903,135 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(payload["candidates"][0]["price"], 1688.0)
         self.assertEqual(payload["candidates"][0]["industry"], "Baijiu")
 
+    def test_important_flashnews_returns_ranked_themes_and_stocks(self) -> None:
+        config = self._config(enabled=True)
+        flashnews_items = [
+            {
+                "id": "1",
+                "seq": "9001",
+                "title": "工信部推进先进封装与算力基础设施协同发展",
+                "summary": "先进封装、算力链条和国产设备受益。",
+                "published_at": "2026-06-22T09:30:00+08:00",
+                "url": "https://example.com/1",
+                "source_label": "同花顺重要快讯",
+            },
+        ]
+        today_trade_items = [
+            {
+                "id": "2",
+                "seq": "9000",
+                "title": "多地发布海风项目开工节奏，海缆订单预期升温",
+                "summary": "海风、海缆、塔筒产业链景气改善。",
+                "published_at": "2026-06-21T14:20:00+08:00",
+                "url": "https://example.com/2",
+                "source_label": "同花顺今日炒什么",
+            }
+        ]
+        llm_batch_payload = {
+            "market_view": "政策与产业趋势共振，事件偏中期持续。",
+            "selection_logic": "优先保留政策驱动且产业链映射清晰的方向。",
+            "themes": [
+                {"name": "先进封装", "confidence": 0.91, "score": 92, "reasons": ["政策与产业升级共振"]},
+                {"name": "海上风电", "confidence": 0.84, "score": 86, "reasons": ["项目开工和订单预期提升"]},
+            ],
+            "stocks": [
+                {"name": "通富微电", "symbol": "002156", "sector": "先进封装", "confidence": 0.88, "score": 89, "reasons": ["封装链条直接受益"]},
+                {"name": "东方电缆", "symbol": "603606", "sector": "海上风电", "confidence": 0.82, "score": 84, "reasons": ["海缆订单弹性"]},
+            ],
+        }
+        llm_final_payload = {
+            "market_view": "最近3天重要简讯显示先进封装与海上风电是高可信主线。",
+            "selection_logic": "选择政策催化明确、产业链受益路径清晰且重复出现的方向。",
+            "themes": [
+                {"name": "先进封装", "confidence": 0.93, "score": 94, "reasons": ["政策支持", "产业升级"]},
+                {"name": "海上风电", "confidence": 0.86, "score": 87, "reasons": ["项目推进", "订单预期"]},
+            ],
+            "stocks": [
+                {"name": "通富微电", "symbol": "002156", "sector": "先进封装", "confidence": 0.9, "score": 91, "reasons": ["封装主线受益"]},
+                {"name": "东方电缆", "symbol": "603606", "sector": "海上风电", "confidence": 0.84, "score": 85, "reasons": ["海缆订单受益"]},
+            ],
+        }
+        flashnews_fetch_mock = MagicMock(return_value=flashnews_items)
+        today_trade_fetch_mock = MagicMock(return_value=today_trade_items)
+
+        with (
+            patch("src.services.alphasift_service.fetch_ths_important_flashnews_items", flashnews_fetch_mock),
+            patch("src.services.alphasift_service.fetch_ths_today_trade_event_items", today_trade_fetch_mock),
+            patch(
+                "src.services.alphasift_service._call_alphasift_json_llm",
+                side_effect=[llm_batch_payload, llm_final_payload],
+            ),
+        ):
+            payload = self._important_flashnews(config, days=3, max_items=200)
+
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["days"], 3)
+        self.assertEqual(payload["flashnews_count"], 2)
+        self.assertTrue(payload["include_today_trade_events"])
+        self.assertTrue(payload["llm_ranked"])
+        self.assertEqual(payload["llm_batches"], 1)
+        self.assertEqual(payload["tag_ids"], ["62857", "21101", "21111"])
+        self.assertEqual(payload["themes"][0]["name"], "先进封装")
+        self.assertEqual(payload["stocks"][0]["symbol"], "002156")
+        self.assertIn("高可信主线", payload["market_view"])
+        self.assertEqual(flashnews_fetch_mock.call_args.kwargs["tag_id"], "62857")
+        self.assertEqual(flashnews_fetch_mock.call_args.kwargs["extra_tag_ids"], ["21101", "21111"])
+        today_trade_fetch_mock.assert_called_once()
+
+    def test_important_flashnews_keeps_result_when_today_trade_events_fail(self) -> None:
+        config = self._config(enabled=True)
+        flashnews_items = [
+            {
+                "id": "1",
+                "seq": "9001",
+                "title": "工信部推进先进封装与算力基础设施协同发展",
+                "summary": "先进封装、算力链条和国产设备受益。",
+                "published_at": "2026-06-22T09:30:00+08:00",
+                "url": "https://example.com/1",
+                "source_label": "同花顺重要快讯",
+            },
+        ]
+        llm_batch_payload = {
+            "market_view": "先进封装具备持续性。",
+            "selection_logic": "优先保留政策与产业升级共振方向。",
+            "themes": [{"name": "先进封装", "confidence": 0.91, "score": 92, "reasons": ["政策支持"]}],
+            "stocks": [{"name": "通富微电", "symbol": "002156", "sector": "先进封装", "confidence": 0.88, "score": 89, "reasons": ["直接受益"]}],
+        }
+        llm_final_payload = dict(llm_batch_payload)
+
+        with (
+            patch("src.services.alphasift_service.fetch_ths_important_flashnews_items", return_value=flashnews_items),
+            patch("src.services.alphasift_service.fetch_ths_today_trade_event_items", side_effect=RuntimeError("boom")),
+            patch(
+                "src.services.alphasift_service._call_alphasift_json_llm",
+                side_effect=[llm_batch_payload, llm_final_payload],
+            ),
+        ):
+            payload = self._important_flashnews(config, days=3, max_items=200)
+
+        self.assertEqual(payload["flashnews_count"], 1)
+        self.assertIn("ths_today_trade_event_failed:RuntimeError", payload["warnings"])
+        self.assertEqual(payload["themes"][0]["name"], "先进封装")
+
+    def test_important_flashnews_raises_integration_error_when_fetch_fails(self) -> None:
+        config = self._config(enabled=True)
+
+        with (
+            patch(
+                "src.services.alphasift_service.fetch_ths_important_flashnews_items",
+                side_effect=RuntimeError("network boom"),
+            ),
+            patch(
+                "src.services.alphasift_service.fetch_ths_today_trade_event_items",
+                side_effect=RuntimeError("today boom"),
+            ),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                self._important_flashnews(config, days=3, max_items=200)
+
+        self.assertEqual(caught.exception.status_code, 424)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_important_flashnews_fetch_failed")
+
     def test_screen_prefers_dsa_daily_history_for_alphasift_enrichment(self) -> None:
         config = self._config(enabled=True)
         parent_module = ModuleType("alphasift")
@@ -2189,6 +2325,133 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         self.assertEqual(context["quote"]["price"], 1688.0)
         self.assertEqual(context["fundamentals"]["coverage"]["valuation"], "available")
         news_mock.assert_not_called()
+
+    def test_search_dsa_stock_news_merges_ths_stock_intel_with_search_results(self) -> None:
+        fake_service = SimpleNamespace(
+            is_available=True,
+            search_stock_news=MagicMock(
+                return_value=SearchResponse(
+                    query="贵州茅台 600519 股票 最新消息",
+                    provider="search-test",
+                    success=True,
+                    results=[
+                        SearchResult(
+                            title="贵州茅台外部新闻",
+                            snippet="搜索服务返回",
+                            url="https://example.com/news",
+                            source="搜索源",
+                            published_date="2026-06-22T09:00:00+08:00",
+                        )
+                    ],
+                )
+            ),
+        )
+
+        with (
+            patch(
+                "src.services.alphasift_service._fetch_ths_stock_notice_items",
+                return_value=[
+                    {
+                        "title": "贵州茅台最新公告",
+                        "snippet": "公告摘要",
+                        "url": "https://example.com/notice",
+                        "source": "上交所股票",
+                        "published_date": "2026-06-23T09:00:00+08:00",
+                        "source_type": "ths_notice",
+                    }
+                ],
+            ),
+            patch("src.services.alphasift_service._fetch_ths_stock_news_items", return_value=[]),
+            patch("src.services.alphasift_service._fetch_ths_stock_report_items", return_value=[]),
+            patch("src.services.alphasift_service._get_dsa_search_service", return_value=fake_service),
+        ):
+            payload = alphasift_service.search_dsa_stock_news("600519", "贵州茅台", max_results=3)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["provider"], "ths_stock_intel+search-test")
+        self.assertEqual(payload["results"][0]["title"], "贵州茅台最新公告")
+        self.assertEqual(payload["results"][0]["source_type"], "ths_notice")
+        self.assertEqual(payload["results"][1]["title"], "贵州茅台外部新闻")
+        self.assertEqual(payload["ths_stock_intel"]["market_id"], 17)
+
+    def test_search_dsa_stock_news_falls_back_to_search_when_ths_fails(self) -> None:
+        fake_service = SimpleNamespace(
+            is_available=True,
+            search_stock_news=MagicMock(
+                return_value=SearchResponse(
+                    query="东方财富 300059 股票 最新消息",
+                    provider="search-test",
+                    success=True,
+                    results=[
+                        SearchResult(
+                            title="东方财富搜索新闻",
+                            snippet="搜索兜底",
+                            url="https://example.com/fallback",
+                            source="搜索源",
+                            published_date="2026-06-22T10:00:00+08:00",
+                        )
+                    ],
+                )
+            ),
+        )
+
+        with (
+            patch(
+                "src.services.alphasift_service._fetch_ths_stock_notice_items",
+                side_effect=RuntimeError("notice failed"),
+            ),
+            patch(
+                "src.services.alphasift_service._fetch_ths_stock_news_items",
+                side_effect=RuntimeError("news failed"),
+            ),
+            patch(
+                "src.services.alphasift_service._fetch_ths_stock_report_items",
+                side_effect=RuntimeError("report failed"),
+            ),
+            patch("src.services.alphasift_service._get_dsa_search_service", return_value=fake_service),
+        ):
+            payload = alphasift_service.search_dsa_stock_news("300059", "东方财富", max_results=3)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["results"][0]["title"], "东方财富搜索新闻")
+        self.assertEqual(payload["ths_stock_intel"]["success"], False)
+        self.assertTrue(any("ths_stock_notice_failed" in item for item in payload["warnings"]))
+
+    def test_search_dsa_stock_news_skips_ths_for_unsupported_code(self) -> None:
+        fake_service = SimpleNamespace(
+            is_available=True,
+            search_stock_news=MagicMock(
+                return_value=SearchResponse(
+                    query="AAPL stock latest news",
+                    provider="search-test",
+                    success=True,
+                    results=[
+                        SearchResult(
+                            title="Apple latest news",
+                            snippet="search only",
+                            url="https://example.com/aapl",
+                            source="search",
+                            published_date="2026-06-22T10:00:00+08:00",
+                        )
+                    ],
+                )
+            ),
+        )
+
+        with (
+            patch("src.services.alphasift_service._fetch_ths_stock_notice_items") as notice_mock,
+            patch("src.services.alphasift_service._fetch_ths_stock_news_items") as news_mock,
+            patch("src.services.alphasift_service._fetch_ths_stock_report_items") as report_mock,
+            patch("src.services.alphasift_service._get_dsa_search_service", return_value=fake_service),
+        ):
+            payload = alphasift_service.search_dsa_stock_news("AAPL", "Apple", max_results=3)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["results"][0]["title"], "Apple latest news")
+        self.assertEqual(payload["ths_stock_intel"]["error"], "ths_stock_intel_unsupported_code")
+        notice_mock.assert_not_called()
+        news_mock.assert_not_called()
+        report_mock.assert_not_called()
 
     def test_screen_bridges_dsa_llm_config_into_alphasift_runtime(self) -> None:
         config = Config(

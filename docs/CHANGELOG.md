@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] AlphaSift `/screening` 页面机会摘要改为手动触发的异步刷新，并持久化展示最近一次成功结果与待恢复任务。
 - [改进] 机会引擎与 AlphaSift 热点详情支持同花顺快讯分类催化信号；当 THS 返回里可解析出 `tagId` 时，会补充 `ths_flashnews` 事件与 `key_news`，否则继续沿用现有摘要事件回退。
 - [改进] AlphaSift 选股完成后写入本地历史，并在 Web 选股页支持刷新后查看和恢复最近结果。
+- [新功能] AlphaSift 新增 `/api/v1/alphasift/important-flashnews`，可联合抓取同花顺“全部重要简讯”“A股重要简讯”与“今日炒什么”最近 3 天事件流，并通过 LLM 汇总高可信板块与相关股票候选。
+- [改进] AlphaSift `/api/v1/alphasift/important-flashnews` 现额外纳入同花顺“异动”快讯标签 `21111`，与全部重要简讯、A股重要简讯、今日炒什么统一去重后做事件驱动汇总。
+- [改进] AlphaSift 候选股的 DSA 新闻增强新增同花顺个股级公告、新闻、研报聚合，按个股代码定向补充证据，并在 THS 不可用时继续回退既有搜索服务。
 
 - [改进] 启动 `ai-pan` 单仓吸收：机会概览新增 `news_status`、`market_outlook`、`evidence_summary`、`review_snapshot`，并在 `/screening`、`/portfolio` 首轮落地 ai-pan 风格证据与复盘摘要。
 - [改进] 机会概览证据摘要补齐主线 / 前排 / 板块胜率解释，`review_snapshot` 可优先汇总已有板块 `review_hit_rate` 与样本数信号。
