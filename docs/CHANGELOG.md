@@ -1,5 +1,7 @@
 # Changelog
 
+- [修复] 收敛 FastAPI 启动期的重导入链路，避免 `--serve-only` 被飞书 / LLM 依赖拖慢或触发循环导入。
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -57,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 避免 runtime scheduler 重建定时任务时重复立即运行事件监控，减少重复告警和后台任务状态丢失。
 - [修复] Web/API runtime scheduler 接管 `--serve --schedule` 后保留 `--dry-run`、`--no-notify` 等启动参数语义。
 - [改进] Web 历史报告详情不再内嵌展示 AI 建议卡片，结构化决策信号集中在 AI 建议页查询，并保留按来源报告 ID 筛选或 URL 参数精确定位入口。
+
+- [改进] Web `/api/v1/opportunities/overview` 单独放宽到 60s 客户端请求超时，降低机会概览在外部信号和新闻加载较慢时被默认 30s 阈值提前中断。
+- [修复] `main.py --serve-only` 启动 FastAPI 时把本地就绪等待窗口从 3s 放宽到 10s，避免调试器或较慢环境下应用仍在初始化时被误判为启动失败并自动退出。
 
 ## [3.23.0] - 2026-06-20
 

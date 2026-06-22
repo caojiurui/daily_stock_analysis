@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -29,17 +30,21 @@ from api.v1.schemas.system_config import (
     ValidateSystemConfigResponse,
 )
 from src.auth import COOKIE_NAME, is_auth_enabled, refresh_auth_state, verify_session
-from src.services.system_config_service import (
-    ConfigConflictError,
-    ConfigImportError,
-    ConfigValidationError,
-    SystemConfigService,
-)
 from src.services.runtime_scheduler import RuntimeSchedulerService
+
+if TYPE_CHECKING:
+    from src.services.system_config_service import SystemConfigService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _is_system_config_error(exc: Exception, name: str) -> bool:
+    return (
+        exc.__class__.__name__ == name
+        and exc.__class__.__module__ == "src.services.system_config_service"
+    )
 
 
 @router.get(
@@ -138,7 +143,7 @@ def _raise_env_backup_access_error(exc: EnvBackupAccessDenied) -> None:
 )
 def get_system_config(
     include_schema: bool = Query(True, description="Whether to include schema metadata"),
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> SystemConfigResponse:
     """Load and return current system configuration."""
     try:
@@ -167,7 +172,7 @@ def get_system_config(
     description="Read a side-effect-free setup readiness summary from saved and runtime configuration.",
 )
 def get_setup_status(
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> SetupStatusResponse:
     """Return first-run setup status without writing config or reloading runtime state."""
     try:
@@ -198,7 +203,7 @@ def get_setup_status(
 )
 def update_system_config(
     request: UpdateSystemConfigRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> UpdateSystemConfigResponse:
     """Validate and persist system configuration updates."""
     try:
@@ -209,25 +214,25 @@ def update_system_config(
             reload_now=request.reload_now,
         )
         return UpdateSystemConfigResponse.model_validate(payload)
-    except ConfigValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "validation_failed",
-                "message": "System configuration validation failed",
-                "issues": exc.issues,
-            },
-        )
-    except ConfigConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "config_version_conflict",
-                "message": "Configuration has changed, please reload and retry",
-                "current_config_version": exc.current_version,
-            },
-        )
     except Exception as exc:
+        if _is_system_config_error(exc, "ConfigValidationError"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_failed",
+                    "message": "System configuration validation failed",
+                    "issues": getattr(exc, "issues", []),
+                },
+            )
+        if _is_system_config_error(exc, "ConfigConflictError"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "config_version_conflict",
+                    "message": "Configuration has changed, please reload and retry",
+                    "current_config_version": getattr(exc, "current_version", ""),
+                },
+            )
         logger.error("Failed to update system configuration: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=500,
@@ -252,7 +257,7 @@ def update_system_config(
 )
 def export_system_config(
     request: Request,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> ExportSystemConfigResponse:
     """Export the active `.env` file for config backup."""
     try:
@@ -304,7 +309,7 @@ def export_system_config(
 def import_system_config(
     request: ImportSystemConfigRequest,
     request_obj: Request,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> UpdateSystemConfigResponse:
     """Import a `.env` backup into the active config."""
     try:
@@ -320,33 +325,33 @@ def import_system_config(
             reload_now=request.reload_now,
         )
         return UpdateSystemConfigResponse.model_validate(payload)
-    except ConfigImportError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "invalid_import_file",
-                "message": exc.message,
-            },
-        )
-    except ConfigValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "validation_failed",
-                "message": "System configuration validation failed",
-                "issues": exc.issues,
-            },
-        )
-    except ConfigConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "config_version_conflict",
-                "message": "Configuration has changed, please reload and retry",
-                "current_config_version": exc.current_version,
-            },
-        )
     except Exception as exc:
+        if _is_system_config_error(exc, "ConfigImportError"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_import_file",
+                    "message": getattr(exc, "message", str(exc)),
+                },
+            )
+        if _is_system_config_error(exc, "ConfigValidationError"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_failed",
+                    "message": "System configuration validation failed",
+                    "issues": getattr(exc, "issues", []),
+                },
+            )
+        if _is_system_config_error(exc, "ConfigConflictError"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "config_version_conflict",
+                    "message": "Configuration has changed, please reload and retry",
+                    "current_config_version": getattr(exc, "current_version", ""),
+                },
+            )
         logger.error("Failed to import system configuration: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=500,
@@ -369,7 +374,7 @@ def import_system_config(
 )
 def validate_system_config(
     request: ValidateSystemConfigRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> ValidateSystemConfigResponse:
     """Run pre-save validation only."""
     try:
@@ -398,7 +403,7 @@ def validate_system_config(
 )
 def test_llm_channel(
     request: TestLLMChannelRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> TestLLMChannelResponse:
     """Validate and test one channel definition without writing `.env`."""
     try:
@@ -444,7 +449,7 @@ def test_llm_channel(
 )
 def test_notification_channel(
     request: TestNotificationChannelRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> TestNotificationChannelResponse:
     """Validate and test one notification channel without writing `.env`."""
     try:
@@ -488,7 +493,7 @@ def test_notification_channel(
 )
 def discover_llm_channel_models(
     request: DiscoverLLMChannelModelsRequest,
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> DiscoverLLMChannelModelsResponse:
     """Discover models for one channel definition without writing `.env`."""
     try:
@@ -531,7 +536,7 @@ def discover_llm_channel_models(
     description="Return categorized field metadata used for dynamic settings form rendering.",
 )
 def get_system_config_schema(
-    service: SystemConfigService = Depends(get_system_config_service),
+    service: "SystemConfigService" = Depends(get_system_config_service),
 ) -> SystemConfigSchemaResponse:
     """Return schema metadata for system configuration fields."""
     try:

@@ -717,6 +717,8 @@ const StockScreeningPage: React.FC = () => {
     () => OPPORTUNITY_RISK_PROFILE_OPTIONS.find((item) => item.id === opportunitySnapshotMeta?.riskProfile)?.label || '平衡',
     [opportunitySnapshotMeta?.riskProfile],
   );
+  void selectedOpportunityScopeLabel;
+  void selectedOpportunityRiskProfileLabel;
   const opportunityFiltersDirty = Boolean(
     opportunitySnapshotMeta
     && (opportunitySnapshotMeta.market !== market

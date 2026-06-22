@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
@@ -535,7 +535,7 @@ def _uses_direct_env_provider(model: str) -> bool:
 
 def normalize_agent_litellm_model(
     model: str,
-    configured_models: Optional[set[str]] = None,
+    configured_models: Optional[Set[str]] = None,
 ) -> str:
     """Normalize AGENT_LITELLM_MODEL while preserving configured router aliases."""
     normalized_model = (model or "").strip()

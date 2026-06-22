@@ -11,8 +11,10 @@
 4. GET /api/v1/stocks/{code}/history 历史行情接口
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 import re
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, Depends
@@ -39,8 +41,10 @@ from src.services.import_parser import (
     parse_import_from_text,
 )
 from src.services.stock_service import StockService
-from src.services.system_config_service import SystemConfigService
 from data_provider.base import normalize_stock_code
+
+if TYPE_CHECKING:
+    from src.services.system_config_service import SystemConfigService
 
 logger = logging.getLogger(__name__)
 

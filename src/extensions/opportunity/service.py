@@ -10,7 +10,6 @@ from data_provider.base import DataFetcherManager
 from src.config import Config, get_config, resolve_news_window_days
 from src.services.portfolio_service import PortfolioService
 from src.services.opportunity_review_service import OpportunityReviewService
-from src.services.alphasift_service import _build_hotspot_event_routes_from_search
 from src.storage import DatabaseManager
 
 from .enhancements import build_cycle_view, build_portfolio_advice, build_tags, map_theme_etf
@@ -707,6 +706,8 @@ class OpportunityService:
 
         for topic in topic_names:
             try:
+                from src.services.alphasift_service import _build_hotspot_event_routes_from_search
+
                 routes = _build_hotspot_event_routes_from_search(topic, self.config)
             except Exception as exc:  # pragma: no cover - defensive fallback
                 warnings.append(f"topic_news_failed:{topic}:{type(exc).__name__}")

@@ -1,6 +1,8 @@
 import apiClient from './index';
 import { toCamelCase } from './utils';
 
+const OPPORTUNITY_OVERVIEW_TIMEOUT_MS = 60000;
+
 export type OpportunityRiskBudget = {
   instrumentType: 'stock' | 'etf' | string;
   positionMinPct?: number;
@@ -169,6 +171,7 @@ export const opportunitiesApi = {
         account_id: payload.accountId,
         risk_profile: payload.riskProfile || 'balanced',
       },
+      timeout: OPPORTUNITY_OVERVIEW_TIMEOUT_MS,
     });
     return toCamelCase<OpportunityOverview>(response.data);
   },

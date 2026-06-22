@@ -54,6 +54,7 @@ describe('opportunitiesApi', () => {
 
     expect(get).toHaveBeenCalledWith('/api/v1/opportunities/overview', {
       params: { market: 'cn', scope: 'balanced', limit: 5, risk_profile: 'aggressive' },
+      timeout: 60000,
     });
     expect(result.newsStatus).toBe('success');
     expect(result.marketOutlook?.predictedDirection).toBe('看多');
