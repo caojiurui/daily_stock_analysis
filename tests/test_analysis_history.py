@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,11 +27,12 @@ except ModuleNotFoundError:
 try:
     from fastapi.testclient import TestClient
     from api.app import create_app
-    from api.v1.endpoints.history import get_history_detail, get_stock_bar
+    from api.v1.endpoints.history import get_history_detail, get_history_list, get_stock_bar
 except ModuleNotFoundError:
     TestClient = None
     create_app = None
     get_history_detail = None
+    get_history_list = None
     get_stock_bar = None
 
 from src.config import Config
@@ -124,6 +126,18 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         auth._auth_enabled = False
         self._temp_dir = tempfile.TemporaryDirectory()
         self._db_path = os.path.join(self._temp_dir.name, "test_analysis_history.db")
+        self._original_env = {
+            key: os.environ.get(key)
+            for key in (
+                "ENV_FILE",
+                "DATABASE_PATH",
+            )
+        }
+        self._env_path = os.path.join(self._temp_dir.name, ".env")
+        with open(self._env_path, "w", encoding="utf-8") as env_file:
+            env_file.write("STOCK_LIST=600519,000001\n")
+
+        os.environ["ENV_FILE"] = self._env_path
         os.environ["DATABASE_PATH"] = self._db_path
 
         Config._instance = None
@@ -132,8 +146,43 @@ class AnalysisHistoryTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         """清理资源"""
+        Config._instance = None
         DatabaseManager.reset_instance()
+        for key, value in self._original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         self._temp_dir.cleanup()
+
+    def test_history_timestamps_include_server_timezone_offset(self) -> None:
+        serialized = HistoryService._serialize_created_at(datetime(2026, 7, 11, 0, 30))
+
+        self.assertIsNotNone(serialized)
+        self.assertRegex(serialized or "", r"[+-]\d{2}:\d{2}$")
+
+    def test_history_query_failure_is_not_returned_as_an_empty_success(self) -> None:
+        db = MagicMock()
+        db.get_analysis_history_paginated.side_effect = RuntimeError("database unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            HistoryService(db).get_history_list(page=1, limit=20)
+
+        if get_history_list is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        with self.assertRaises(Exception) as raised:
+            get_history_list(
+                stock_code=None,
+                report_type=None,
+                start_date=None,
+                end_date=None,
+                page=1,
+                limit=20,
+                db_manager=db,
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code", None), 500)
 
     def _build_result(self) -> AnalysisResult:
         """构造分析结果"""
@@ -561,8 +610,8 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(item["trend_prediction"], "看多")
         self.assertEqual(item["analysis_summary"], "基本面稳健，短期震荡")
         self.assertEqual(item["operation_advice"], "持有")
-        self.assertEqual(item["action"], "hold")
-        self.assertEqual(item["action_label"], "持有")
+        self.assertEqual(item["action"], "buy")
+        self.assertEqual(item["action_label"], "买入")
         self.assertEqual(item["model_used"], "gemini/gemini-2.5-pro")
         self.assertEqual(item["current_price"], 51.5)
         self.assertEqual(item["change_pct"], -4.61)
@@ -736,6 +785,76 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(response.items[0].operation_advice, "不建议买入")
         self.assertEqual(response.items[0].action, "avoid")
         self.assertEqual(response.items[0].action_label, "回避")
+
+    def test_stock_bar_item_aligns_score_and_legacy_advice(self) -> None:
+        if get_stock_bar is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        result = self._build_result()
+        result.operation_advice = "持有"
+        result.sentiment_score = 78
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_stock_bar_score_align",
+            report_type="detailed",
+            news_content="个股正文",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertGreater(saved, 0)
+
+        response = get_stock_bar(
+            start_date=None,
+            end_date=None,
+            limit=10,
+            db_manager=self.db,
+        )
+
+        self.assertEqual(len(response.items), 1)
+        self.assertEqual(response.items[0].operation_advice, "持有")
+        self.assertEqual(response.items[0].sentiment_score, 78)
+        self.assertEqual(response.items[0].action, "buy")
+        self.assertEqual(response.items[0].action_label, "买入")
+
+    def test_stock_bar_item_falls_back_to_raw_result_summary_fields(self) -> None:
+        if get_stock_bar is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        result = self._build_result()
+        result.operation_advice = "Hold"
+        result.report_language = "en"
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_stock_bar_raw_fallback",
+            report_type="detailed",
+            news_content="stock report",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertGreater(saved, 0)
+
+        with self.db.session_scope() as session:
+            row = session.query(AnalysisHistory).filter(
+                AnalysisHistory.query_id == "query_stock_bar_raw_fallback"
+            ).first()
+            self.assertIsNotNone(row)
+            row.sentiment_score = None
+            row.operation_advice = None
+
+        response = get_stock_bar(
+            start_date=None,
+            end_date=None,
+            limit=10,
+            db_manager=self.db,
+        )
+
+        self.assertEqual(len(response.items), 1)
+        self.assertEqual(response.items[0].sentiment_score, 78)
+        self.assertEqual(response.items[0].operation_advice, "Hold")
+        self.assertEqual(response.items[0].action, "buy")
+        self.assertEqual(response.items[0].action_label, "Buy")
 
     def test_history_detail_uses_service_resolved_action_fields(self) -> None:
         if get_history_detail is None:
@@ -1140,6 +1259,12 @@ class AnalysisHistoryTestCase(unittest.TestCase):
                         "bottom": [],
                     }
                 },
+                "concept_boards": {
+                    "data": {
+                        "top": [{"name": "机器人概念", "change_pct": 4.2}],
+                        "bottom": [],
+                    }
+                },
                 "earnings": {
                     "data": {
                         "financial_report": {"report_date": "2025-12-31", "revenue": 1000},
@@ -1161,6 +1286,7 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(report.details.dividend_metrics["ttm_dividend_yield_pct"], 2.6)
         self.assertEqual(report.details.belong_boards, [{"name": "白酒", "type": "行业"}])
         self.assertEqual(report.details.sector_rankings["top"][0]["name"], "白酒")
+        self.assertEqual(report.details.concept_rankings["top"][0]["name"], "机器人概念")
 
     def test_history_detail_uses_raw_code_for_legacy_jp_kr_fundamental_snapshot(self) -> None:
         """Legacy bare JP/KR history rows should display suffixes but read snapshots by stored code."""
@@ -1499,6 +1625,27 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertIn("Core Conclusion", markdown)
         self.assertIn("Unnamed Stock (AAPL)", markdown)
         self.assertNotIn("核心结论", markdown)
+
+    def test_history_markdown_signal_metadata_uses_explicit_avoid_action(self) -> None:
+        result = AnalysisResult(
+            code="AAPL",
+            name="Apple",
+            sentiment_score=90,
+            trend_prediction="Bullish",
+            operation_advice="Hold",
+            analysis_summary="Risk remains elevated.",
+            report_language="en",
+            action="avoid",
+            action_label="Avoid",
+        )
+
+        markdown = HistoryService(self.db)._generate_single_stock_markdown(
+            result,
+            MagicMock(created_at=None),
+        )
+
+        self.assertIn("**🟡 Avoid** | Bullish", markdown)
+        self.assertNotIn("Strong Buy", markdown)
 
     def test_history_markdown_returns_persisted_market_review_report(self) -> None:
         """Market review history should return the saved Markdown without rebuilding a stock report."""

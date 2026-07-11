@@ -55,6 +55,7 @@ from src.services.market_light_alerts import (
     make_market_light_payload,
     normalize_market_alert_parameters,
 )
+from src.services.market_light_service import normalize_market_alert_region
 from src.services.opportunity_alerts import (
     OPPORTUNITY_ALERT_DATA_SOURCE,
     OpportunityAlert,
@@ -970,7 +971,7 @@ class AlertService:
             return target.strip()
         if target_scope == "market":
             try:
-                return normalize_market_region(target)
+                return normalize_market_alert_region(target)
             except ValueError as exc:
                 raise AlertServiceError(str(exc)) from exc
         try:
