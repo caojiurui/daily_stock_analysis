@@ -382,6 +382,160 @@ describe('StockScreeningPage', () => {
     expect(screen.getByText(/上次刷新：/)).toBeInTheDocument();
   });
 
+  it('replaces stale cached summary and hotspot detail after manual refresh', async () => {
+    getAlphaSiftStatus.mockResolvedValueOnce({
+      enabled: true,
+      available: true,
+      installSpecIsDefault: true,
+    });
+    window.localStorage.setItem('dsa.alphasift.opportunityOverview.v1', JSON.stringify({
+      overview: {
+        enabled: true,
+        marketTemperature: { score: 61, label: 'warm' },
+        keyNews: [{ title: '旧新闻摘要', source: 'cache' }],
+        topSectors: [],
+        opportunities: [
+          {
+            code: '512480',
+            name: '旧缓存ETF',
+            instrumentType: 'etf',
+            score: 70,
+            reason: 'stale idea',
+            sector: '旧题材',
+            riskBudget: { instrumentType: 'etf', positionMinPct: 20, positionMaxPct: 30 },
+            chipStatus: { status: 'unavailable' },
+            dataQuality: 'partial',
+          },
+        ],
+        dataQuality: { level: 'partial', warnings: [] },
+        warnings: [],
+      },
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      savedAt: '2026-06-21T09:00:00.000Z',
+    }));
+    getOpportunityScanTask.mockResolvedValueOnce({
+      taskId: 'op-task-1',
+      traceId: 'op-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '机会扫描完成',
+      market: 'cn',
+      scope: 'balanced',
+      riskProfile: 'balanced',
+      maxResults: 6,
+      result: {
+        enabled: true,
+        marketTemperature: { score: 78, label: 'warm' },
+        keyNews: [{ title: '最新新闻摘要', source: 'live' }],
+        topSectors: [],
+        opportunities: [
+          {
+            code: '300750',
+            name: '最新机会股',
+            instrumentType: 'stock',
+            score: 84,
+            reason: 'fresh idea',
+            sector: 'AI算力',
+            riskBudget: { instrumentType: 'stock', positionMinPct: 10, positionMaxPct: 20 },
+            chipStatus: { status: 'unavailable' },
+            dataQuality: 'partial',
+          },
+        ],
+        dataQuality: { level: 'partial', warnings: [] },
+        warnings: [],
+      },
+    });
+    getHotspots
+      .mockResolvedValueOnce({
+        enabled: true,
+        provider: 'akshare',
+        providerUsed: 'akshare',
+        hotspots: [
+          {
+            topic: 'AI算力',
+            name: 'AI算力',
+            heatScore: 80,
+            stage: '启动',
+          },
+        ],
+        hotspotCount: 1,
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        provider: 'akshare',
+        providerUsed: 'akshare',
+        hotspots: [
+          {
+            topic: 'AI算力',
+            name: 'AI算力',
+            heatScore: 92,
+            stage: '加速',
+          },
+        ],
+        hotspotCount: 1,
+      });
+    getHotspotDetail
+      .mockResolvedValueOnce({
+        enabled: true,
+        provider: 'akshare',
+        topic: 'AI算力',
+        name: 'AI算力',
+        summary: '旧热点催化',
+        route: [{ title: '旧催化', description: '旧消息', source: 'eastmoney_board_change' }],
+        stocks: [{ code: '300000', name: '旧龙头', role: '核心龙头', hotStockScore: 80 }],
+        stockCount: 1,
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        provider: 'akshare',
+        topic: 'AI算力',
+        name: 'AI算力',
+        summary: '最新热点催化',
+        route: [{ title: '新催化', description: '最新消息', source: 'eastmoney_board_change' }],
+        stocks: [{ code: '601138', name: '新龙头', role: '核心龙头', hotStockScore: 91 }],
+        stockCount: 1,
+      });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('旧缓存ETF')).toBeInTheDocument();
+    expect(screen.getByText('旧新闻摘要')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新机会摘要' }));
+
+    await waitFor(() =>
+      expect(startOpportunityScan).toHaveBeenCalledWith({
+        market: 'cn',
+        scope: 'balanced',
+        riskProfile: 'balanced',
+        watchlistOnly: false,
+        maxResults: 6,
+      }),
+    );
+    expect(await screen.findByText('最新机会股')).toBeInTheDocument();
+    expect(screen.getByText('最新新闻摘要')).toBeInTheDocument();
+    expect(screen.queryByText('旧缓存ETF')).not.toBeInTheDocument();
+    expect(screen.queryByText('旧新闻摘要')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /展开热点题材/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /AI算力/ }));
+    expect(await screen.findByText('旧催化')).toBeInTheDocument();
+    expect(screen.getByText('旧龙头')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /刷新热点题材/ }));
+
+    await waitFor(() => expect(getHotspots).toHaveBeenLastCalledWith({ provider: 'akshare', top: 12, refresh: true }));
+    await waitFor(() =>
+      expect(getHotspotDetail).toHaveBeenLastCalledWith({ topic: 'AI算力', provider: 'akshare', refresh: true }),
+    );
+    expect(await screen.findByText('新催化')).toBeInTheDocument();
+    expect(screen.getByText('新龙头')).toBeInTheDocument();
+    expect(screen.queryByText('旧催化')).not.toBeInTheDocument();
+    expect(screen.queryByText('旧龙头')).not.toBeInTheDocument();
+  });
+
   it('shows decision signal band, review snapshot, and news filters from opportunity overview', async () => {
     getAlphaSiftStatus.mockResolvedValueOnce({
       enabled: true,

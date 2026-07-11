@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Dict, Optional
 
@@ -17,6 +18,7 @@ from src.services.task_queue import TaskStatus as QueueTaskStatus
 from src.services.task_queue import get_task_queue
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class OpportunityScanRequest(BaseModel):
@@ -73,6 +75,14 @@ def opportunity_overview(
     risk_profile: str = "balanced",
     config: Config = Depends(get_config_dep),
 ) -> Dict[str, Any]:
+    logger.info(
+        "[OpportunityAPI] overview request: market=%s scope=%s limit=%s account_id=%s risk_profile=%s",
+        market,
+        scope,
+        limit,
+        account_id,
+        risk_profile,
+    )
     return _service(config).overview(
         market=market,
         scope=scope,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from data_provider.base import DataFetcherManager
@@ -25,6 +26,8 @@ from .ths_provider import ThsExternalInfoProvider
 
 _MAX_NEWS_TOPICS = 6
 _MAX_KEY_NEWS = 6
+
+logger = logging.getLogger(__name__)
 
 
 class OpportunityService:
@@ -113,6 +116,15 @@ class OpportunityService:
         scope = self._normalize_scope(scope)
         risk_profile = normalize_risk_profile(risk_profile)
         limit = max(1, min(int(limit), 50))
+        logger.info(
+            "[Opportunity] overview start: market=%s scope=%s limit=%s risk_profile=%s account_id=%s enabled=%s",
+            market,
+            scope,
+            limit,
+            risk_profile,
+            account_id,
+            self.enabled,
+        )
         if not self.enabled:
             return self._disabled_payload(market=market, scope=scope, limit=limit, risk_profile=risk_profile)
 
@@ -146,6 +158,15 @@ class OpportunityService:
         for warning in list(ths_payload.get("warnings") or []):
             if warning and warning not in warnings:
                 warnings.append(warning)
+        logger.info(
+            "[Opportunity] source snapshot counts: sectors=%s concepts=%s hot_stocks=%s ths_industry=%s ths_concept=%s ths_signals=%s",
+            len(sectors),
+            len(concepts),
+            len(hot_stocks),
+            len(ths_payload.get("industry_rows") or []),
+            len(ths_payload.get("concept_rows") or []),
+            len(ths_payload.get("stock_signals") or {}),
+        )
         sectors = self._merge_snapshot_rows(
             primary_rows=sectors,
             external_rows=ths_payload.get("industry_rows") or [],
@@ -205,6 +226,14 @@ class OpportunityService:
             market_outlook=market_outlook,
             top_snapshots=top_snapshots,
             review_snapshot=review_snapshot,
+        )
+        logger.info(
+            "[Opportunity] overview done: top_sectors=%s opportunities=%s key_news=%s warnings=%s data_quality=%s",
+            len(top_snapshots),
+            len(opportunities),
+            len(key_news),
+            warnings[:5],
+            data_quality_level,
         )
 
         return {
@@ -482,6 +511,14 @@ class OpportunityService:
         max_results: int = 10,
         risk_profile: str = "balanced",
     ) -> Dict[str, Any]:
+        logger.info(
+            "[Opportunity] scan start: market=%s scope=%s watchlist_only=%s max_results=%s risk_profile=%s",
+            market,
+            scope,
+            bool(watchlist_only),
+            max_results,
+            risk_profile,
+        )
         payload = self.overview(market=market, scope=scope, limit=max_results, risk_profile=risk_profile)
         if watchlist_only and payload.get("enabled"):
             watchlist = set(self._watchlist_symbols())
@@ -493,6 +530,13 @@ class OpportunityService:
             payload["opportunities"] = filtered
         payload["watchlist_only"] = bool(watchlist_only)
         payload["scan_mode"] = "opportunity"
+        logger.info(
+            "[Opportunity] scan done: enabled=%s opportunities=%s watchlist_only=%s warnings=%s",
+            bool(payload.get("enabled")),
+            len(payload.get("opportunities") or []),
+            bool(watchlist_only),
+            list(payload.get("warnings") or [])[:5],
+        )
         return payload
 
     @staticmethod
@@ -703,6 +747,11 @@ class OpportunityService:
         news_score_by_topic: Dict[str, float] = {}
         key_news: List[Dict[str, Any]] = []
         news_window_days = self._effective_news_window_days()
+        logger.info(
+            "[Opportunity] news enrichment start: topics=%s window_days=%s",
+            topic_names,
+            news_window_days,
+        )
 
         for topic in topic_names:
             try:
@@ -711,6 +760,7 @@ class OpportunityService:
                 routes = _build_hotspot_event_routes_from_search(topic, self.config)
             except Exception as exc:  # pragma: no cover - defensive fallback
                 warnings.append(f"topic_news_failed:{topic}:{type(exc).__name__}")
+                logger.warning("[Opportunity] news enrichment failed for topic=%s: %s", topic, exc)
                 continue
 
             catalysts = self._routes_to_catalysts(topic, routes, news_window_days=news_window_days)
@@ -754,6 +804,11 @@ class OpportunityService:
             enriched.append(score_sector(payload))
 
         enriched.sort(key=lambda item: item.score, reverse=True)
+        logger.info(
+            "[Opportunity] news enrichment done: enriched_topics=%s key_news=%s",
+            list(catalysts_by_topic.keys()),
+            len(key_news),
+        )
         return enriched[:limit], self._dedupe_key_news(key_news, limit=min(limit, _MAX_KEY_NEWS))
 
     def _build_opportunities(
